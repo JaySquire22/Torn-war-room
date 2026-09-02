@@ -321,8 +321,10 @@ export default function App() {
       );
       if (error) throw error;
       setSaveFailed(false);
+      setSaveErrorDetail("");
     } catch (e) {
       console.error("save failed", e);
+      setSaveErrorDetail((e && e.message) ? e.message : JSON.stringify(e));
       if (attempt < 2) {
         // brief backoff in case it was a transient rate limit, before surfacing an error
         setTimeout(() => saveMine(uname, dateKey, dayData, attempt + 1), 1500 * (attempt + 1));
