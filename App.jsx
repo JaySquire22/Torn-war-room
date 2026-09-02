@@ -309,13 +309,12 @@ export default function App() {
   const saveMine = useCallback(async (uname, dateKey, dayData, attempt = 0) => {
     try {
       const { error } = await supabase.from("availability").upsert(
-        {
+    {
           username: uname,
           date_key: dateKey,
           slots: dayData.slots,
           notes: dayData.notes,
           bracket: myBracketRef.current || null,
-          updated_at: new Date().toISOString(),
         },
         { onConflict: "username,date_key" }
       );
