@@ -660,8 +660,9 @@ export default function App() {
 
         {/* error strip — only rendered when there's an actual error */}
         {(saveFailed || syncFailed) && (
-          <div style={{ background: COLORS.redSoft, border: `1px solid ${COLORS.red}`, color: COLORS.red }} className="rounded-sm px-3 py-2 mb-3 flex items-center gap-1 text-[11px]">
-            ⚠ {saveFailed ? "your last change didn't save" : "sync failed"} — check connection
+          <div style={{ background: COLORS.redSoft, border: `1px solid ${COLORS.red}`, color: COLORS.red }} className="rounded-sm px-3 py-2 mb-3 text-[11px]">
+            <div>⚠ {saveFailed ? "your last change didn't save" : "sync failed"} — check connection</div>
+            {saveErrorDetail && <div style={{ opacity: 0.85 }} className="mt-1 break-words">{saveErrorDetail}</div>}
           </div>
         )}
 
