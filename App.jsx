@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { Clock3, Plus, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
-import { supabase } from "./lib/supabaseClient";
+import { supabase } from "./supabaseClient";
 
 // TODO: paste your original base64 logo string back in here.
 // Replaced with a placeholder to avoid transcription risk on the ~9,000-character
