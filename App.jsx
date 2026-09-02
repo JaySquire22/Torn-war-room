@@ -138,7 +138,8 @@ export default function App() {
   // { [username]: { [dateKey]: number[] } }
   const [allAvail, setAllAvail] = useState({});
   const [loading, setLoading] = useState(true);
-  const [saveFailed, setSaveFailed] = useState(false);
+ const [saveFailed, setSaveFailed] = useState(false);
+  const [saveErrorDetail, setSaveErrorDetail] = useState("");
   const [syncFailed, setSyncFailed] = useState(false);
   const [now, setNow] = useState(new Date());
   const [rangeStart, setRangeStart] = useState(16); // 08:00
