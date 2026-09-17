@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.5.0
+// @version      0.6.0
 // @description  Adds ranked-weapon bargain assessment, filters and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -107,15 +107,17 @@
   function refreshWeaponOptions(){const select=$('kabf-weapon');if(!select)return;const selected=select.value,names=[...new Set([...state.weaponCatalogue,...state.rows.values()].map(r=>typeof r==='string'?r:r.name).filter(Boolean))];if(selected&&!names.includes(selected))names.push(selected);names.sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All weapons</option>'+names.map(x=>`<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');if(selected)select.value=selected;}
   async function loadWeaponCatalogue(){if(state.catalogueLoading||state.weaponCatalogue.length)return;state.catalogueLoading=true;try{const payloads=await Promise.all(['Primary','Secondary','Melee'].map(cat=>pdaGet(`https://api.torn.com/v2/torn/items?cat=${encodeURIComponent(cat)}&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`)));state.weaponCatalogue=[...new Set(payloads.flatMap(p=>(p.items||[]).map(x=>x.name).filter(Boolean)))];refreshWeaponOptions();}catch(_){refreshWeaponOptions();}finally{state.catalogueLoading=false;}}
 
-  function requestBody(r) {
+  function requestBody(r,exact=true) {
     const body={limit:100,offset:0,sort_by:'timestamp',sort_order:'desc',item_name:r.name};
-    (r.bonuses||[]).slice(0,2).forEach((b,i)=>{const p=i+1,title=b.title||b.name||'',id=b.id||BONUS_IDS[title],value=number(b.value??b.percentage??b.percent); if(!id)return; body[`bonus${p}_ids`]=[Number(id)]; if(value!==null){const exact=Math.round(value);body[`bonus${p}_id`]=Number(id);body[`bonus${p}_value_min`]=exact;body[`bonus${p}_value_max`]=exact;}});
+    (r.bonuses||[]).slice(0,2).forEach((b,i)=>{const p=i+1,title=b.title||b.name||'',id=b.id||BONUS_IDS[title],value=number(b.value??b.percentage??b.percent); if(!id)return; body[`bonus${p}_ids`]=[Number(id)]; if(exact&&value!==null){const exactValue=Math.round(value);body[`bonus${p}_id`]=Number(id);body[`bonus${p}_value_min`]=exactValue;body[`bonus${p}_value_max`]=exactValue;}});
     return body;
   }
 
   function targetBonuses(r){return (r.bonuses||[]).slice(0,2).map(b=>({id:Number(b.id||BONUS_IDS[b.title||b.name]),value:Math.round(number(b.value??b.percentage??b.percent))})).filter(b=>b.id&&Number.isFinite(b.value));}
   function saleBonuses(s){return (s.bonus_values||s.bonuses||[]).map(b=>({id:Number(b.bonus_id??b.id),value:Math.round(number(b.bonus_value??b.value??b.percentage??b.percent))})).filter(b=>b.id&&Number.isFinite(b.value));}
   function exactBonusMatch(r,s){const wanted=targetBonuses(r),got=saleBonuses(s);return wanted.length===got.length&&wanted.every(w=>got.some(g=>g.id===w.id&&g.value===w.value));}
+  function sameBonusTypes(r,s){const wanted=targetBonuses(r),got=saleBonuses(s);return wanted.length===got.length&&wanted.every(w=>got.some(g=>g.id===w.id));}
+  function bonusDistance(r,s){const got=saleBonuses(s);return targetBonuses(r).reduce((total,w)=>{const g=got.find(x=>x.id===w.id);return total+(g?Math.abs(g.value-w.value):999);},0);}
   function saleEpoch(s){const raw=s.timestamp??s.sold_at??s.end_time??s.created_at;if(raw==null)return null;if(typeof raw==='number'||/^\d+$/.test(String(raw))) {const n=Number(raw);return n>1e12?Math.floor(n/1000):Math.floor(n);}const parsed=Date.parse(raw);return Number.isFinite(parsed)?Math.floor(parsed/1000):null;}
   function comparableSales(r,data) {
     const cutoff=Math.floor(Date.now()/1000)-(365*24*60*60);
@@ -124,35 +126,37 @@
     return sales.slice(0,20);
   }
 
-  function cacheKey(r){return 'kabf-exact12:'+r.name+':'+(r.bonuses||[]).slice(0,2).map(b=>`${b.title||b.name}:${Math.round(number(b.value??b.percentage??b.percent))}`).join('|');}
-  async function history(r) {
-    const key=cacheKey(r); try{const c=JSON.parse(localStorage.getItem(key)||'null');if(c&&Date.now()-c.at<CACHE_MS)return c.data;}catch(_){ }
-    const data=await pdaPost(HISTORY_URL,{'Content-Type':'application/json',apikey:HISTORY_KEY,Authorization:'Bearer '+HISTORY_KEY},JSON.stringify(requestBody(r)));
+  function closestSales(r,data){const cutoff=Math.floor(Date.now()/1000)-(365*24*60*60);const sales=(data.auctions||[]).filter(x=>number(x.price)>0&&sameBonusTypes(r,x)&&saleEpoch(x)!==null&&saleEpoch(x)>=cutoff).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality),_damage:number(x.stat_damage??x.damage),_bonuses:saleBonuses(x),_bonusGap:bonusDistance(r,x)}));sales.sort((a,b)=>a._bonusGap-b._bonusGap||((r.quality!==null&&a._quality!==null?Math.abs(a._quality-r.quality):9999)-(r.quality!==null&&b._quality!==null?Math.abs(b._quality-r.quality):9999)));return sales.slice(0,20);}
+
+  function cacheKey(r,exact){return `kabf-${exact?'exact':'closest'}12:`+r.name+':'+(r.bonuses||[]).slice(0,2).map(b=>`${b.title||b.name}:${Math.round(number(b.value??b.percentage??b.percent))}`).join('|');}
+  async function history(r,exact=true) {
+    const key=cacheKey(r,exact); try{const c=JSON.parse(localStorage.getItem(key)||'null');if(c&&Date.now()-c.at<CACHE_MS)return c.data;}catch(_){ }
+    const data=await pdaPost(HISTORY_URL,{'Content-Type':'application/json',apikey:HISTORY_KEY,Authorization:'Bearer '+HISTORY_KEY},JSON.stringify(requestBody(r,exact)));
     localStorage.setItem(key,JSON.stringify({at:Date.now(),data})); return data;
   }
 
   function salesHtml(x){return (x.sales||[]).slice(0,10).map(s=>`<div class="kabf-sale"><span>DMG ${s._damage??'?'} · Bonus ${s._bonuses?.map(b=>`${b.value}%`).join(' + ')||'?'} · Quality ${s._quality??'?'}%</span><b>${money(s._price)}</b></div>`).join('');}
   function renderBadge(r) {
     if(!r.li?.isConnected)return;
-    let badge=r.li.querySelector('.kabf-badge'); if(!badge){badge=document.createElement('div');badge.className='kabf-badge';r.li.appendChild(badge);}
+    let badge=r.li.querySelector('.kabf-badge'); if(!badge){badge=document.createElement('div');badge.className='kabf-badge';r.li.appendChild(badge);}const wasOpen=badge.querySelector('details')?.open||false;
     if(r.error){badge.className='kabf-badge kabf-bad';badge.innerHTML=`${escapeHtml(r.error)}<br><button class="kabf-history">Retry history</button>`;badge.querySelector('button').onclick=()=>assessOne(r,true);return;}
     if(!r.result){badge.className='kabf-badge kabf-wait';badge.innerHTML=`<details><summary>Show auction historical prices</summary><div class="kabf-sales">Historical auction comparison available<br><button class="kabf-history">Load auction history</button></div></details>`;badge.querySelector('button').onclick=async()=>{badge.querySelector('button').disabled=true;badge.querySelector('button').textContent='Loading…';await assessOne(r,true);};return;}
     const x=r.result, good=x.diff<0; badge.className='kabf-badge '+(good?'kabf-good':'kabf-bad');
-    const summary=remaining(r)!==null&&remaining(r)<=1800&&remaining(r)>0?`<b>${x.diff===null?'No estimate':`${Math.abs(x.diff).toFixed(1)}% ${good?'below':'above'} median`}</b> · `:'';
-    badge.innerHTML=`${summary}median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)}<br>Quality ${r.quality??'?'}% · ${x.count} closest comparable sale${x.count===1?'':'s'}${x.qualityGap!==null?` · closest quality gap ${x.qualityGap.toFixed(1)}%`:''}<details><summary>Show recent comparable sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`;
+    const summary=remaining(r)!==null&&remaining(r)<=3600&&remaining(r)>0?`<b>${x.diff===null?'No estimate':`${Math.abs(x.diff).toFixed(1)}% ${good?'below':'above'} median`}</b> · `:'';
+    badge.innerHTML=`${x.exact?'':'<b style="color:#ff6b78">No exact comparisons</b><br>'}${summary}median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)}<br>Quality ${r.quality??'?'}% · ${x.count} ${x.exact?'exact':'closest'} comparable sale${x.count===1?'':'s'}${x.qualityGap!==null?` · closest quality gap ${x.qualityGap.toFixed(1)}%`:''}<details><summary>Show recent comparable sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`;if(wasOpen)badge.querySelector('details').open=true;
     r.li.classList.toggle('kabf-best',x.diff<=-10);
   }
 
   async function assessOne(r,force=false){
     if(r.result&&!force){renderBadge(r);return r.result;}
-    try{const data=await history(r),sales=comparableSales(r,data),prices=sales.map(x=>x._price),med=median(prices),closest=sales.find(x=>r.quality!==null&&x._quality!==null);r.result={median:med,low:prices.length?Math.min(...prices):null,high:prices.length?Math.max(...prices):null,count:sales.length,sales,diff:med&&r.price!==null?((r.price-med)*100/med):null,qualityGap:closest?Math.abs(closest._quality-r.quality):null};r.error=null;state.assessed++;}
+    try{const exactData=await history(r,true);let sales=comparableSales(r,exactData),exact=sales.length>0;if(!exact){const broadData=await history(r,false);sales=closestSales(r,broadData);}const prices=sales.map(x=>x._price),med=median(prices),closest=sales.find(x=>r.quality!==null&&x._quality!==null);r.result={exact,median:med,low:prices.length?Math.min(...prices):null,high:prices.length?Math.max(...prices):null,count:sales.length,sales,diff:med&&r.price!==null?((r.price-med)*100/med):null,qualityGap:closest?Math.abs(closest._quality-r.quality):null};r.error=null;state.assessed++;}
     catch(e){r.error='Assessment unavailable: '+e.message;state.errors++;}
     renderBadge(r);renderResults();return r.result;
   }
 
   async function hydrateVisibleCards(){
     if(state.busy||state.hydrating)return;const rows=currentRows();if(!rows.length)return;state.hydrating=true;
-    try{const missing=rows.filter(r=>!r.name);if(missing.length)await enrich(missing);rows.filter(matchesSearch).forEach(renderBadge);for(const r of rows){const rem=remaining(r);if(matchesSearch(r)&&rem!==null&&rem>0&&rem<=1800&&!r.result){await assessOne(r);await new Promise(resolve=>setTimeout(resolve,120));}}}
+    try{const missing=rows.filter(r=>!r.name);if(missing.length)await enrich(missing);rows.filter(matchesSearch).forEach(renderBadge);for(const r of rows){const rem=remaining(r);if(matchesSearch(r)&&rem!==null&&rem>0&&rem<=3600&&!r.result){await assessOne(r);await new Promise(resolve=>setTimeout(resolve,120));}}}
     catch(e){if($('kabf-status'))$('kabf-status').textContent='Visible-card setup failed: '+e.message;}
     finally{state.hydrating=false;updateStatus();}
   }
@@ -163,7 +167,7 @@
       for(let i=0;i<rows.length;i++){
         const r=rows[i];
         if(!matchesSearch(r))continue;
-        if(remaining(r)===null||remaining(r)>1800||remaining(r)<=0)continue;
+        if(remaining(r)===null||remaining(r)>3600||remaining(r)<=0)continue;
         if(r.result&&!r.error){renderBadge(r);continue;}
         $('kabf-status').textContent=`Page ${state.page}: bargain-checking ${i+1} of ${rows.length} · ${state.assessed} ending soon…`;
         await assessOne(r);await new Promise(resolve=>setTimeout(resolve,120));
@@ -174,10 +178,12 @@
   function currentRows(){return [...state.rows.values()].filter(r=>r.li.isConnected);}
   function pageFingerprint(){return currentRows().map(r=>r.uid).sort().join('|');}
   function pager(){return document.querySelector(`${PANEL_SELECTOR} div.pagination-wrap`);}
-  function usable(a){return a&&a.offsetParent!==null&&!a.matches('.disabled,[aria-disabled="true"]');}
+  function usable(a){return a&&!a.matches('.disabled,[aria-disabled="true"]');}
   function nextPageLink(){
     const p=pager();if(!p)return null;
-    const direct=[...p.querySelectorAll('a')].find(a=>usable(a)&&(/next/i.test(`${a.className} ${a.title} ${a.getAttribute('aria-label')||''}`)||/^[›»>]$/.test(a.textContent.trim())));
+    const anchors=[...p.querySelectorAll('a')];
+    const numbered=anchors.find(a=>usable(a)&&a.textContent.trim()===String(state.page+1));if(numbered)return numbered;
+    const direct=anchors.find(a=>usable(a)&&(/next/i.test(`${a.className} ${a.title} ${a.getAttribute('aria-label')||''}`)||/^[›»>]$/.test(a.textContent.trim())));
     if(direct)return direct;
     const active=p.querySelector('.active,[aria-current="page"]');
     if(active){let n=active.nextElementSibling;while(n){const a=n.matches?.('a')?n:n.querySelector?.('a');if(usable(a))return a;n=n.nextElementSibling;}}
@@ -213,7 +219,7 @@
         $('kabf-status').textContent=`Page ${state.page} complete · opening the next auction page…`;
         await clickAndWait(next);
       }
-      const matches=matchingRows().length,soon=[...state.rows.values()].filter(r=>remaining(r)!==null&&remaining(r)>0&&remaining(r)<=1800).length;
+      const matches=matchingRows().length,soon=[...state.rows.values()].filter(r=>remaining(r)!==null&&remaining(r)>0&&remaining(r)<=3600).length;
       $('kabf-status').textContent=`Search complete: ${state.page} page${state.page===1?'':'s'} · ${state.rows.size} auctions indexed · ${matches} match${matches===1?'':'es'} · ${soon} ending within 30 minutes.`;
       renderResults();$('kabf-results').classList.add('open');
     } catch(e){$('kabf-status').textContent='Full scan stopped: '+e.message;}
@@ -222,7 +228,7 @@
 
   function matchesSearch(r){const weapon=$('kabf-weapon')?.value||'',bonus=$('kabf-bonus')?.value||'';return (!weapon||r.name===weapon)&&(!bonus||(r.bonuses||[]).some(b=>(b.title||b.name)===bonus));}
   function matchingRows(){return [...state.rows.values()].filter(matchesSearch).sort((a,b)=>(remaining(a)??Infinity)-(remaining(b)??Infinity));}
-  function renderResults(){const list=$('kabf-results-list');if(!list)return;const rows=matchingRows();list.innerHTML=rows.length?rows.map(r=>{const rem=remaining(r),x=r.result,diff=x?.diff,endingSoon=rem!==null&&rem<=1800&&rem>0,deal=diff==null?(endingSoon?'Bargain check pending':'Load history for comparison'):`${Math.abs(diff).toFixed(1)}% ${diff<0?'below':'above'} historical median`;return `<article class="kabf-result ${diff<0?'good':''}"><a href="#" class="title" data-kabf-open="${escapeHtml(r.uid)}">${escapeHtml(r.name||'Loading weapon…')}</a><div class="meta">${escapeHtml((r.bonuses||[]).map(b=>(b.title||b.name)+(b.value!=null?' '+b.value+'%':'')).join(', ')||'Loading bonuses…')} · Page ${r.page}<br>${remainingText(rem)} · Current bid ${money(r.price)}</div><div class="${diff==null?'waiting':'deal'}">${deal}${x?`<br>Median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)} · ${x.count} comparisons`:''}</div>${x?`<details><summary>Comparable auction sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`:`<button class="kabf-history" data-kabf-history="${escapeHtml(r.uid)}">Load auction history</button>`}<button class="kabf-open" data-kabf-open="${escapeHtml(r.uid)}">Open auction card</button></article>`;}).join(''):'<div class="kabf-result">No indexed auctions match those weapon and bonus choices.</div>';}
+  function renderResults(){const list=$('kabf-results-list');if(!list)return;const openUids=new Set([...list.querySelectorAll('details[open]')].map(d=>d.closest('[data-result-uid]')?.dataset.resultUid).filter(Boolean)),rows=matchingRows();list.innerHTML=rows.length?rows.map(r=>{const rem=remaining(r),x=r.result,diff=x?.diff,endingSoon=rem!==null&&rem<=3600&&rem>0,deal=diff==null?(endingSoon?'Bargain check pending':'Load history for comparison'):`${Math.abs(diff).toFixed(1)}% ${diff<0?'below':'above'} historical median`;return `<article class="kabf-result ${diff<0?'good':''}" data-result-uid="${escapeHtml(r.uid)}"><a href="#" class="title" data-kabf-open="${escapeHtml(r.uid)}">${escapeHtml(r.name||'Loading weapon…')}</a><div class="meta">${escapeHtml((r.bonuses||[]).map(b=>(b.title||b.name)+(b.value!=null?' '+b.value+'%':'')).join(', ')||'Loading bonuses…')} · Page ${r.page}<br>${remainingText(rem)} · Current bid ${money(r.price)}</div><div class="${diff==null?'waiting':'deal'}">${x&&!x.exact?'<b style="color:#ff6b78">No exact comparisons</b><br>':''}${deal}${x?`<br>Median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)} · ${x.count} ${x.exact?'exact':'closest'} comparisons`:''}</div>${x?`<details ${openUids.has(r.uid)?'open':''}><summary>Comparable auction sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`:`<button class="kabf-history" data-kabf-history="${escapeHtml(r.uid)}">Load auction history</button>`}<button class="kabf-open" data-kabf-open="${escapeHtml(r.uid)}">Open auction card</button></article>`;}).join(''):'<div class="kabf-result">No indexed auctions match those weapon and bonus choices.</div>';}
 
   function updateStatus(){if(!$('kabf-status')||state.busy)return;const visible=[...state.rows.values()].filter(r=>r.li.isConnected).length;$('kabf-status').textContent=`${visible} visible weapon auction${visible===1?'':'s'} · ${state.assessed} assessed${state.errors?` · ${state.errors} error${state.errors===1?'':'s'}`:''}`;}
   function schedule(){clearTimeout(state.timer);state.timer=setTimeout(scrape,450);}
