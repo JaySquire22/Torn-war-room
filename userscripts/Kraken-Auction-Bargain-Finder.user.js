@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.4.1
+// @version      0.5.0
 // @description  Adds ranked-weapon bargain assessment, filters and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -19,10 +19,10 @@
   const ROW_SELECTOR = 'div.items-list-wrap > ul.items-list > li';
   const BONUS_IDS = {Achilles:50,Assassinate:72,Backstab:52,Berserk:54,Bleed:57,Blindfire:33,Blindside:51,Bloodlust:85,Comeback:67,Conserve:55,Cripple:45,Crusher:49,Cupid:47,Deadeye:63,Deadly:62,Demoralize:36,Disarm:86,'Double Tap':105,'Double-edged':74,Empower:87,Eviscerate:56,Execute:75,Expose:1,Finale:82,Focus:79,Freeze:38,Frenzy:80,Fury:64,Grace:53,Hazardous:34,'Home run':83,Irradiate:102,Lacerate:89,Motivation:61,Paralyze:59,Parry:84,Penetrate:101,Plunder:21,Powerful:68,Proficience:14,Puncture:66,Quicken:88,Rage:65,Revitalize:41,Roshambo:43,Shock:120,Slow:44,Smash:104,Smurf:73,Specialist:71,Spray:35,Storage:37,Stricken:20,Stun:58,Suppress:60,'Sure Shot':78,Throttle:48,Toxin:103,Warlord:81,Weaken:46,'Wind-up':76,Wither:42};
 
-  const state = { rows: new Map(), busy: false, hydrating: false, scanningAll: false, stopRequested: false, timer: null, hydrateTimer: null, assessed: 0, errors: 0, page: 0 };
+  const state = { rows: new Map(), weaponCatalogue: [], catalogueLoading: false, busy: false, hydrating: false, scanningAll: false, stopRequested: false, timer: null, hydrateTimer: null, assessed: 0, errors: 0, page: 0 };
   const $ = (id) => document.getElementById(id);
   const money = (n) => Number.isFinite(n) ? '$' + Math.round(n).toLocaleString() : '—';
-  const number = (v) => { const n = Number(String(v ?? '').replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : null; };
+  const number = (v) => { if(v===null||v===undefined||String(v).trim()==='')return null;const n = Number(String(v).replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : null; };
   const median = (a) => { if (!a.length) return null; const s=[...a].sort((x,y)=>x-y), m=Math.floor(s.length/2); return s.length%2?s[m]:Math.round((s[m-1]+s[m])/2); };
   const escapeHtml = (s) => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 
@@ -39,7 +39,7 @@
       li.kabf-hidden{display:none!important} li.kabf-best{box-shadow:inset 4px 0 #3bc98b}
       #kabf-results{position:fixed;inset:5vh 3vw;z-index:2147483646;background:#0d131e;border:1px solid #46546d;border-radius:14px;color:#fff;box-shadow:0 12px 45px #000;display:none;flex-direction:column;overflow:hidden;font:13px/1.4 Arial,sans-serif}
       #kabf-results.open{display:flex} #kabf-results .head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:#171f2e;font-weight:800} #kabf-results .head button{width:auto;min-height:34px;margin:0;padding:5px 12px}
-      #kabf-results-list{padding:10px;overflow:auto;display:grid;gap:8px}.kabf-result{background:#171f2e;border:1px solid #344158;border-radius:10px;padding:10px}.kabf-result.good{border-left:4px solid #3bc98b}.kabf-result .title{font-weight:800;font-size:14px}.kabf-result .meta{color:#aab4c5;margin-top:3px}.kabf-result .deal{color:#86efc0;font-weight:800;margin-top:5px}.kabf-result .waiting{color:#f4d284;margin-top:5px}
+      #kabf-results-list{padding:10px;overflow:auto;display:grid;gap:8px}.kabf-result{background:#171f2e;border:1px solid #344158;border-radius:10px;padding:10px}.kabf-result.good{border-left:4px solid #3bc98b}.kabf-result .title{font-weight:800;font-size:14px;color:#fff!important}.kabf-result .meta{color:#aab4c5;margin-top:3px}.kabf-result .deal{color:#86efc0;font-weight:800;margin-top:5px}.kabf-result .waiting{color:#f4d284;margin-top:5px}
       .kabf-open,.kabf-history{display:inline-block;width:auto!important;min-height:34px!important;margin:7px 6px 0 0!important;padding:6px 10px!important;background:#344158!important;color:#fff!important;border:0!important;border-radius:7px!important;text-decoration:none!important;font-weight:700!important}.kabf-history{background:#6e3343!important}.kabf-sales{margin-top:7px;padding-top:6px;border-top:1px solid #344158;color:#aab4c5}.kabf-sale{display:flex;justify-content:space-between;gap:10px;padding:3px 0}.kabf-highlight{animation:kabf-flash 1s 4;box-shadow:inset 0 0 0 3px #f3b644!important}@keyframes kabf-flash{50%{background:rgba(243,182,68,.24)}}
     `; document.head.appendChild(style);
   }
@@ -48,18 +48,19 @@
     if ($('kabf')) return;
     const box=document.createElement('details'); box.id='kabf'; box.open=true;
     box.innerHTML=`<summary>🐙 Kraken Auction Bargain Finder</summary><div class="body">
-      <label>Weapon names<input id="kabf-weapon" placeholder="e.g. ArmaLite, Minigun"></label>
+      <label>Weapon<select id="kabf-weapon"><option value="">All weapons</option></select></label>
       <label>Bonus<select id="kabf-bonus"><option value="">All bonuses</option>${Object.keys(BONUS_IDS).sort().map(x=>`<option>${x}</option>`).join('')}</select></label>
       <button class="wide" id="kabf-assess">Search every auction page</button>
       <button class="wide" id="kabf-show">Show matching auctions</button>
       <button class="wide" id="kabf-stop" style="display:none;background:#4a5568">Stop after this page</button>
     </div><div id="kabf-status">Waiting for weapon auctions…</div>`;
     const list=panel.querySelector('div.items-list-wrap'); panel.insertBefore(box,list||panel.firstChild);
-    ['kabf-weapon','kabf-bonus'].forEach(id=>$(id).addEventListener(id==='kabf-bonus'?'change':'input',renderResults));
+    ['kabf-weapon','kabf-bonus'].forEach(id=>$(id).addEventListener('change',renderResults));
     $('kabf-assess').addEventListener('click', assessVisible);
     $('kabf-show').addEventListener('click',()=>{renderResults();$('kabf-results').classList.add('open');});
     $('kabf-stop').addEventListener('click',()=>{state.stopRequested=true;$('kabf-status').textContent='Stopping after the current page…';});
     if(!$('kabf-results')){const results=document.createElement('section');results.id='kabf-results';results.innerHTML='<div class="head"><span>🐙 Matching Auction Weapons</span><button id="kabf-close">Close</button></div><div id="kabf-results-list"></div>';document.body.appendChild(results);$('kabf-close').addEventListener('click',()=>results.classList.remove('open'));$('kabf-results-list').addEventListener('click',async e=>{const open=e.target.closest('[data-kabf-open]'),historyButton=e.target.closest('[data-kabf-history]');if(open){e.preventDefault();await openAuctionCard(open.dataset.kabfOpen);}if(historyButton){e.preventDefault();const r=state.rows.get(historyButton.dataset.kabfHistory);if(r){historyButton.disabled=true;historyButton.textContent='Loading history…';await assessOne(r,true);renderResults();}}});}
+    loadWeaponCatalogue();
   }
 
   function endTimeToEpoch(title){const m=String(title||'').match(/(\d{2}):(\d{2}):(\d{2})\s*-\s*(\d{2})\/(\d{2})\/(\d{2})/);if(!m)return null;return Math.floor(Date.UTC(2000+Number(m[6]),Number(m[5])-1,Number(m[4]),Number(m[1]),Number(m[2]),Number(m[3]))/1000);}
@@ -100,28 +101,37 @@
       const details=Array.isArray(data.itemdetails)?data.itemdetails:Object.values(data.itemdetails||{});
       details.forEach(d=>{const r=state.rows.get(String(d.uid??d.UID)); if(!r)return; const stats=d.stats||{}; Object.assign(r,{name:d.name||'Unknown',type:d.type||'',rarity:d.rarity||'',bonuses:Array.isArray(d.bonuses)?d.bonuses:Object.values(d.bonuses||{}),damage:number(stats.damage??d.damage),accuracy:number(stats.accuracy??d.accuracy),quality:number(d.quality??d.stat_quality??stats.quality)});});
     }
+    refreshWeaponOptions();
   }
 
+  function refreshWeaponOptions(){const select=$('kabf-weapon');if(!select)return;const selected=select.value,names=[...new Set([...state.weaponCatalogue,...state.rows.values()].map(r=>typeof r==='string'?r:r.name).filter(Boolean))];if(selected&&!names.includes(selected))names.push(selected);names.sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All weapons</option>'+names.map(x=>`<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');if(selected)select.value=selected;}
+  async function loadWeaponCatalogue(){if(state.catalogueLoading||state.weaponCatalogue.length)return;state.catalogueLoading=true;try{const payloads=await Promise.all(['Primary','Secondary','Melee'].map(cat=>pdaGet(`https://api.torn.com/v2/torn/items?cat=${encodeURIComponent(cat)}&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`)));state.weaponCatalogue=[...new Set(payloads.flatMap(p=>(p.items||[]).map(x=>x.name).filter(Boolean)))];refreshWeaponOptions();}catch(_){refreshWeaponOptions();}finally{state.catalogueLoading=false;}}
+
   function requestBody(r) {
-    const body={limit:50,offset:0,sort_by:'timestamp',sort_order:'desc',item_name:r.name};
-    (r.bonuses||[]).slice(0,2).forEach((b,i)=>{const p=i+1,title=b.title||b.name||'',id=b.id||BONUS_IDS[title],value=number(b.value??b.percentage??b.percent); if(!id)return; body[`bonus${p}_ids`]=[Number(id)]; if(value!==null){const m=Math.abs(value)*.1;body[`bonus${p}_id`]=Number(id);body[`bonus${p}_value_min`]=Math.max(0,Math.floor(value-m));body[`bonus${p}_value_max`]=Math.ceil(value+m);}});
+    const body={limit:100,offset:0,sort_by:'timestamp',sort_order:'desc',item_name:r.name};
+    (r.bonuses||[]).slice(0,2).forEach((b,i)=>{const p=i+1,title=b.title||b.name||'',id=b.id||BONUS_IDS[title],value=number(b.value??b.percentage??b.percent); if(!id)return; body[`bonus${p}_ids`]=[Number(id)]; if(value!==null){const exact=Math.round(value);body[`bonus${p}_id`]=Number(id);body[`bonus${p}_value_min`]=exact;body[`bonus${p}_value_max`]=exact;}});
     return body;
   }
 
+  function targetBonuses(r){return (r.bonuses||[]).slice(0,2).map(b=>({id:Number(b.id||BONUS_IDS[b.title||b.name]),value:Math.round(number(b.value??b.percentage??b.percent))})).filter(b=>b.id&&Number.isFinite(b.value));}
+  function saleBonuses(s){return (s.bonus_values||s.bonuses||[]).map(b=>({id:Number(b.bonus_id??b.id),value:Math.round(number(b.bonus_value??b.value??b.percentage??b.percent))})).filter(b=>b.id&&Number.isFinite(b.value));}
+  function exactBonusMatch(r,s){const wanted=targetBonuses(r),got=saleBonuses(s);return wanted.length===got.length&&wanted.every(w=>got.some(g=>g.id===w.id&&g.value===w.value));}
+  function saleEpoch(s){const raw=s.timestamp??s.sold_at??s.end_time??s.created_at;if(raw==null)return null;if(typeof raw==='number'||/^\d+$/.test(String(raw))) {const n=Number(raw);return n>1e12?Math.floor(n/1000):Math.floor(n);}const parsed=Date.parse(raw);return Number.isFinite(parsed)?Math.floor(parsed/1000):null;}
   function comparableSales(r,data) {
-    const sales=(data.auctions||[]).filter(x=>number(x.price)>0).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality)}));
+    const cutoff=Math.floor(Date.now()/1000)-(365*24*60*60);
+    const sales=(data.auctions||[]).filter(x=>number(x.price)>0&&exactBonusMatch(r,x)&&saleEpoch(x)!==null&&saleEpoch(x)>=cutoff).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality),_damage:number(x.stat_damage??x.damage),_bonuses:saleBonuses(x)}));
     sales.sort((a,b)=>{const aq=r.quality!==null&&a._quality!==null?Math.abs(a._quality-r.quality):9999,bq=r.quality!==null&&b._quality!==null?Math.abs(b._quality-r.quality):9999;return aq-bq;});
     return sales.slice(0,20);
   }
 
-  function cacheKey(r){return 'kabf:'+r.name+':'+(r.bonuses||[]).slice(0,2).map(b=>`${b.title||b.name}:${b.value??''}`).join('|');}
+  function cacheKey(r){return 'kabf-exact12:'+r.name+':'+(r.bonuses||[]).slice(0,2).map(b=>`${b.title||b.name}:${Math.round(number(b.value??b.percentage??b.percent))}`).join('|');}
   async function history(r) {
     const key=cacheKey(r); try{const c=JSON.parse(localStorage.getItem(key)||'null');if(c&&Date.now()-c.at<CACHE_MS)return c.data;}catch(_){ }
     const data=await pdaPost(HISTORY_URL,{'Content-Type':'application/json',apikey:HISTORY_KEY,Authorization:'Bearer '+HISTORY_KEY},JSON.stringify(requestBody(r)));
     localStorage.setItem(key,JSON.stringify({at:Date.now(),data})); return data;
   }
 
-  function salesHtml(x){return (x.sales||[]).slice(0,5).map(s=>`<div class="kabf-sale"><span>Quality ${s._quality??'?'}%</span><b>${money(s._price)}</b></div>`).join('');}
+  function salesHtml(x){return (x.sales||[]).slice(0,10).map(s=>`<div class="kabf-sale"><span>DMG ${s._damage??'?'} · Bonus ${s._bonuses?.map(b=>`${b.value}%`).join(' + ')||'?'} · Quality ${s._quality??'?'}%</span><b>${money(s._price)}</b></div>`).join('');}
   function renderBadge(r) {
     if(!r.li?.isConnected)return;
     let badge=r.li.querySelector('.kabf-badge'); if(!badge){badge=document.createElement('div');badge.className='kabf-badge';r.li.appendChild(badge);}
@@ -210,7 +220,7 @@
     finally{state.busy=false;state.scanningAll=false;$('kabf-assess').disabled=false;$('kabf-stop').style.display='none';renderResults();}
   }
 
-  function matchesSearch(r){const terms=($('kabf-weapon')?.value||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean),bonus=$('kabf-bonus')?.value||'';return (!terms.length||terms.some(x=>(r.name||'').toLowerCase().includes(x)))&&(!bonus||(r.bonuses||[]).some(b=>(b.title||b.name)===bonus));}
+  function matchesSearch(r){const weapon=$('kabf-weapon')?.value||'',bonus=$('kabf-bonus')?.value||'';return (!weapon||r.name===weapon)&&(!bonus||(r.bonuses||[]).some(b=>(b.title||b.name)===bonus));}
   function matchingRows(){return [...state.rows.values()].filter(matchesSearch).sort((a,b)=>(remaining(a)??Infinity)-(remaining(b)??Infinity));}
   function renderResults(){const list=$('kabf-results-list');if(!list)return;const rows=matchingRows();list.innerHTML=rows.length?rows.map(r=>{const rem=remaining(r),x=r.result,diff=x?.diff,endingSoon=rem!==null&&rem<=1800&&rem>0,deal=diff==null?(endingSoon?'Bargain check pending':'Load history for comparison'):`${Math.abs(diff).toFixed(1)}% ${diff<0?'below':'above'} historical median`;return `<article class="kabf-result ${diff<0?'good':''}"><a href="#" class="title" data-kabf-open="${escapeHtml(r.uid)}">${escapeHtml(r.name||'Loading weapon…')}</a><div class="meta">${escapeHtml((r.bonuses||[]).map(b=>(b.title||b.name)+(b.value!=null?' '+b.value+'%':'')).join(', ')||'Loading bonuses…')} · Page ${r.page}<br>${remainingText(rem)} · Current bid ${money(r.price)}</div><div class="${diff==null?'waiting':'deal'}">${deal}${x?`<br>Median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)} · ${x.count} comparisons`:''}</div>${x?`<details><summary>Comparable auction sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`:`<button class="kabf-history" data-kabf-history="${escapeHtml(r.uid)}">Load auction history</button>`}<button class="kabf-open" data-kabf-open="${escapeHtml(r.uid)}">Open auction card</button></article>`;}).join(''):'<div class="kabf-result">No indexed auctions match those weapon and bonus choices.</div>';}
 
