@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.4.0
+// @version      0.4.1
 // @description  Adds ranked-weapon bargain assessment, filters and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -19,7 +19,7 @@
   const ROW_SELECTOR = 'div.items-list-wrap > ul.items-list > li';
   const BONUS_IDS = {Achilles:50,Assassinate:72,Backstab:52,Berserk:54,Bleed:57,Blindfire:33,Blindside:51,Bloodlust:85,Comeback:67,Conserve:55,Cripple:45,Crusher:49,Cupid:47,Deadeye:63,Deadly:62,Demoralize:36,Disarm:86,'Double Tap':105,'Double-edged':74,Empower:87,Eviscerate:56,Execute:75,Expose:1,Finale:82,Focus:79,Freeze:38,Frenzy:80,Fury:64,Grace:53,Hazardous:34,'Home run':83,Irradiate:102,Lacerate:89,Motivation:61,Paralyze:59,Parry:84,Penetrate:101,Plunder:21,Powerful:68,Proficience:14,Puncture:66,Quicken:88,Rage:65,Revitalize:41,Roshambo:43,Shock:120,Slow:44,Smash:104,Smurf:73,Specialist:71,Spray:35,Storage:37,Stricken:20,Stun:58,Suppress:60,'Sure Shot':78,Throttle:48,Toxin:103,Warlord:81,Weaken:46,'Wind-up':76,Wither:42};
 
-  const state = { rows: new Map(), busy: false, scanningAll: false, stopRequested: false, timer: null, assessed: 0, errors: 0, page: 0 };
+  const state = { rows: new Map(), busy: false, hydrating: false, scanningAll: false, stopRequested: false, timer: null, hydrateTimer: null, assessed: 0, errors: 0, page: 0 };
   const $ = (id) => document.getElementById(id);
   const money = (n) => Number.isFinite(n) ? '$' + Math.round(n).toLocaleString() : '—';
   const number = (v) => { const n = Number(String(v ?? '').replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : null; };
@@ -87,6 +87,7 @@
       if(row.name)renderBadge(row);
     });
     updateStatus();
+    clearTimeout(state.hydrateTimer);state.hydrateTimer=setTimeout(hydrateVisibleCards,250);
   }
 
   async function pdaGet(url,headers={}) { const r=await PDA_httpGet(url,headers); if(Number(r.status)>=400)throw new Error(`Torn API HTTP ${r.status}`); return JSON.parse(r.responseText); }
@@ -103,7 +104,7 @@
 
   function requestBody(r) {
     const body={limit:50,offset:0,sort_by:'timestamp',sort_order:'desc',item_name:r.name};
-    (r.bonuses||[]).slice(0,2).forEach((b,i)=>{const p=i+1,title=b.title||b.name||'',id=b.id||BONUS_IDS[title],value=number(b.value??b.percentage??b.percent); if(!id)return; body[`bonus${p}_ids`]=[Number(id)]; if(value!==null){const m=Math.abs(value)*.1;body[`bonus${p}_id`]=Number(id);body[`bonus${p}_value_min`]=Math.max(0,Math.round((value-m)*100)/100);body[`bonus${p}_value_max`]=Math.round((value+m)*100)/100;}});
+    (r.bonuses||[]).slice(0,2).forEach((b,i)=>{const p=i+1,title=b.title||b.name||'',id=b.id||BONUS_IDS[title],value=number(b.value??b.percentage??b.percent); if(!id)return; body[`bonus${p}_ids`]=[Number(id)]; if(value!==null){const m=Math.abs(value)*.1;body[`bonus${p}_id`]=Number(id);body[`bonus${p}_value_min`]=Math.max(0,Math.floor(value-m));body[`bonus${p}_value_max`]=Math.ceil(value+m);}});
     return body;
   }
 
@@ -125,7 +126,7 @@
     if(!r.li?.isConnected)return;
     let badge=r.li.querySelector('.kabf-badge'); if(!badge){badge=document.createElement('div');badge.className='kabf-badge';r.li.appendChild(badge);}
     if(r.error){badge.className='kabf-badge kabf-bad';badge.innerHTML=`${escapeHtml(r.error)}<br><button class="kabf-history">Retry history</button>`;badge.querySelector('button').onclick=()=>assessOne(r,true);return;}
-    if(!r.result){badge.className='kabf-badge kabf-wait';badge.innerHTML=`Historical auction comparison available<br><button class="kabf-history">Load auction history</button>`;badge.querySelector('button').onclick=async()=>{badge.querySelector('button').disabled=true;badge.querySelector('button').textContent='Loading…';await assessOne(r,true);};return;}
+    if(!r.result){badge.className='kabf-badge kabf-wait';badge.innerHTML=`<details><summary>Show auction historical prices</summary><div class="kabf-sales">Historical auction comparison available<br><button class="kabf-history">Load auction history</button></div></details>`;badge.querySelector('button').onclick=async()=>{badge.querySelector('button').disabled=true;badge.querySelector('button').textContent='Loading…';await assessOne(r,true);};return;}
     const x=r.result, good=x.diff<0; badge.className='kabf-badge '+(good?'kabf-good':'kabf-bad');
     const summary=remaining(r)!==null&&remaining(r)<=1800&&remaining(r)>0?`<b>${x.diff===null?'No estimate':`${Math.abs(x.diff).toFixed(1)}% ${good?'below':'above'} median`}</b> · `:'';
     badge.innerHTML=`${summary}median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)}<br>Quality ${r.quality??'?'}% · ${x.count} closest comparable sale${x.count===1?'':'s'}${x.qualityGap!==null?` · closest quality gap ${x.qualityGap.toFixed(1)}%`:''}<details><summary>Show recent comparable sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`;
@@ -137,6 +138,13 @@
     try{const data=await history(r),sales=comparableSales(r,data),prices=sales.map(x=>x._price),med=median(prices),closest=sales.find(x=>r.quality!==null&&x._quality!==null);r.result={median:med,low:prices.length?Math.min(...prices):null,high:prices.length?Math.max(...prices):null,count:sales.length,sales,diff:med&&r.price!==null?((r.price-med)*100/med):null,qualityGap:closest?Math.abs(closest._quality-r.quality):null};r.error=null;state.assessed++;}
     catch(e){r.error='Assessment unavailable: '+e.message;state.errors++;}
     renderBadge(r);renderResults();return r.result;
+  }
+
+  async function hydrateVisibleCards(){
+    if(state.busy||state.hydrating)return;const rows=currentRows();if(!rows.length)return;state.hydrating=true;
+    try{const missing=rows.filter(r=>!r.name);if(missing.length)await enrich(missing);rows.filter(matchesSearch).forEach(renderBadge);for(const r of rows){const rem=remaining(r);if(matchesSearch(r)&&rem!==null&&rem>0&&rem<=1800&&!r.result){await assessOne(r);await new Promise(resolve=>setTimeout(resolve,120));}}}
+    catch(e){if($('kabf-status'))$('kabf-status').textContent='Visible-card setup failed: '+e.message;}
+    finally{state.hydrating=false;updateStatus();}
   }
 
   async function assessPage(rows) {
