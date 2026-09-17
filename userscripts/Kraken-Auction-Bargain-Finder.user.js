@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.6.0
+// @version      0.6.1
 // @description  Adds ranked-weapon bargain assessment, filters and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -55,9 +55,9 @@
       <button class="wide" id="kabf-stop" style="display:none;background:#4a5568">Stop after this page</button>
     </div><div id="kabf-status">Waiting for weapon auctions…</div>`;
     const list=panel.querySelector('div.items-list-wrap'); panel.insertBefore(box,list||panel.firstChild);
-    ['kabf-weapon','kabf-bonus'].forEach(id=>$(id).addEventListener('change',renderResults));
+    ['kabf-weapon','kabf-bonus'].forEach(id=>$(id).addEventListener('change',async()=>{renderResults();if(!state.busy){await loadMatchingHistories();renderResults();}}));
     $('kabf-assess').addEventListener('click', assessVisible);
-    $('kabf-show').addEventListener('click',()=>{renderResults();$('kabf-results').classList.add('open');});
+    $('kabf-show').addEventListener('click',async()=>{if(!state.busy)await loadMatchingHistories();renderResults();$('kabf-results').classList.add('open');});
     $('kabf-stop').addEventListener('click',()=>{state.stopRequested=true;$('kabf-status').textContent='Stopping after the current page…';});
     if(!$('kabf-results')){const results=document.createElement('section');results.id='kabf-results';results.innerHTML='<div class="head"><span>🐙 Matching Auction Weapons</span><button id="kabf-close">Close</button></div><div id="kabf-results-list"></div>';document.body.appendChild(results);$('kabf-close').addEventListener('click',()=>results.classList.remove('open'));$('kabf-results-list').addEventListener('click',async e=>{const open=e.target.closest('[data-kabf-open]'),historyButton=e.target.closest('[data-kabf-history]');if(open){e.preventDefault();await openAuctionCard(open.dataset.kabfOpen);}if(historyButton){e.preventDefault();const r=state.rows.get(historyButton.dataset.kabfHistory);if(r){historyButton.disabled=true;historyButton.textContent='Loading history…';await assessOne(r,true);renderResults();}}});}
     loadWeaponCatalogue();
@@ -68,9 +68,11 @@
   function remainingText(seconds){if(seconds===null)return 'Unknown end time';if(seconds<=0)return 'Ended';const h=Math.floor(seconds/3600),m=Math.floor((seconds%3600)/60),s=seconds%60;return h?`${h}h ${m}m remaining`:`${m}m ${s}s remaining`;}
 
   function parsePrice(li) {
+    const clean=li.cloneNode(true);clean.querySelectorAll('.kabf-badge,#kabf,.kabf-result').forEach(x=>x.remove());
     const candidates=['.price-wrap','.price','.bid-wrap','.current-bid','.amount'];
-    for (const sel of candidates) { const el=li.querySelector(sel); const matches=el&&el.textContent.match(/\$\s*([\d,]+)/g); if(matches?.length){const values=matches.map(number).filter(Number.isFinite); if(values.length)return Math.max(...values);} }
-    const matches=li.textContent.match(/\$\s*([\d,]+)/g)||[]; return matches.length ? Math.max(...matches.map(number).filter(Number.isFinite)) : null;
+    for (const sel of candidates) { const el=clean.querySelector(sel); const matches=el&&el.textContent.match(/\$\s*([\d,]+)/g); if(matches?.length){const values=matches.map(number).filter(Number.isFinite); if(values.length)return values[0];} }
+    const bidText=[...clean.querySelectorAll('div,span')].find(x=>/^\s*Bid\s*:/i.test(x.textContent||''))?.textContent||clean.textContent;
+    const match=bidText.match(/Bid\s*:\s*\$\s*([\d,]+)/i)||bidText.match(/\$\s*([\d,]+)/);return match?number(match[1]):null;
   }
 
   function scrape() {
@@ -140,7 +142,7 @@
     if(!r.li?.isConnected)return;
     let badge=r.li.querySelector('.kabf-badge'); if(!badge){badge=document.createElement('div');badge.className='kabf-badge';r.li.appendChild(badge);}const wasOpen=badge.querySelector('details')?.open||false;
     if(r.error){badge.className='kabf-badge kabf-bad';badge.innerHTML=`${escapeHtml(r.error)}<br><button class="kabf-history">Retry history</button>`;badge.querySelector('button').onclick=()=>assessOne(r,true);return;}
-    if(!r.result){badge.className='kabf-badge kabf-wait';badge.innerHTML=`<details><summary>Show auction historical prices</summary><div class="kabf-sales">Historical auction comparison available<br><button class="kabf-history">Load auction history</button></div></details>`;badge.querySelector('button').onclick=async()=>{badge.querySelector('button').disabled=true;badge.querySelector('button').textContent='Loading…';await assessOne(r,true);};return;}
+    if(!r.result){badge.className='kabf-badge kabf-wait';badge.innerHTML=`<details><summary>Show auction historical prices</summary><div class="kabf-sales">Historical auction comparison available<br><button class="kabf-history">Load auction history</button></div></details>`;const details=badge.querySelector('details');if(wasOpen)details.open=true;badge.querySelector('button').onclick=async()=>{details.open=true;badge.querySelector('button').disabled=true;badge.querySelector('button').textContent='Loading…';await assessOne(r,true);};return;}
     const x=r.result, good=x.diff<0; badge.className='kabf-badge '+(good?'kabf-good':'kabf-bad');
     const summary=remaining(r)!==null&&remaining(r)<=3600&&remaining(r)>0?`<b>${x.diff===null?'No estimate':`${Math.abs(x.diff).toFixed(1)}% ${good?'below':'above'} median`}</b> · `:'';
     badge.innerHTML=`${x.exact?'':'<b style="color:#ff6b78">No exact comparisons</b><br>'}${summary}median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)}<br>Quality ${r.quality??'?'}% · ${x.count} ${x.exact?'exact':'closest'} comparable sale${x.count===1?'':'s'}${x.qualityGap!==null?` · closest quality gap ${x.qualityGap.toFixed(1)}%`:''}<details><summary>Show recent comparable sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`;if(wasOpen)badge.querySelector('details').open=true;
@@ -160,6 +162,8 @@
     catch(e){if($('kabf-status'))$('kabf-status').textContent='Visible-card setup failed: '+e.message;}
     finally{state.hydrating=false;updateStatus();}
   }
+
+  async function loadMatchingHistories(){const rows=matchingRows().filter(r=>!r.result);for(let i=0;i<rows.length;i++){if(state.stopRequested)break;$('kabf-status').textContent=`Loading matching auction history ${i+1} of ${rows.length}…`;await assessOne(rows[i]);await new Promise(resolve=>setTimeout(resolve,120));}}
 
   async function assessPage(rows) {
       await enrich(rows);
@@ -219,11 +223,12 @@
         $('kabf-status').textContent=`Page ${state.page} complete · opening the next auction page…`;
         await clickAndWait(next);
       }
+      await loadMatchingHistories();
       const matches=matchingRows().length,soon=[...state.rows.values()].filter(r=>remaining(r)!==null&&remaining(r)>0&&remaining(r)<=3600).length;
       $('kabf-status').textContent=`Search complete: ${state.page} page${state.page===1?'':'s'} · ${state.rows.size} auctions indexed · ${matches} match${matches===1?'':'es'} · ${soon} ending within 30 minutes.`;
       renderResults();$('kabf-results').classList.add('open');
     } catch(e){$('kabf-status').textContent='Full scan stopped: '+e.message;}
-    finally{state.busy=false;state.scanningAll=false;$('kabf-assess').disabled=false;$('kabf-stop').style.display='none';renderResults();}
+    finally{state.busy=false;state.scanningAll=false;$('kabf-assess').disabled=false;$('kabf-stop').style.display='none';renderResults();$('kabf-results')?.classList.add('open');}
   }
 
   function matchesSearch(r){const weapon=$('kabf-weapon')?.value||'',bonus=$('kabf-bonus')?.value||'';return (!weapon||r.name===weapon)&&(!bonus||(r.bonuses||[]).some(b=>(b.title||b.name)===bonus));}
