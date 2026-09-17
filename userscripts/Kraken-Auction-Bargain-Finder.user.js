@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.1.0
+// @version      0.3.0
 // @description  Adds ranked-weapon bargain assessment, filters and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -19,7 +19,7 @@
   const ROW_SELECTOR = 'div.items-list-wrap > ul.items-list > li';
   const BONUS_IDS = {Achilles:50,Assassinate:72,Backstab:52,Berserk:54,Bleed:57,Blindfire:33,Blindside:51,Bloodlust:85,Comeback:67,Conserve:55,Cripple:45,Crusher:49,Cupid:47,Deadeye:63,Deadly:62,Demoralize:36,Disarm:86,'Double Tap':105,'Double-edged':74,Empower:87,Eviscerate:56,Execute:75,Expose:1,Finale:82,Focus:79,Freeze:38,Frenzy:80,Fury:64,Grace:53,Hazardous:34,'Home run':83,Irradiate:102,Lacerate:89,Motivation:61,Paralyze:59,Parry:84,Penetrate:101,Plunder:21,Powerful:68,Proficience:14,Puncture:66,Quicken:88,Rage:65,Revitalize:41,Roshambo:43,Shock:120,Slow:44,Smash:104,Smurf:73,Specialist:71,Spray:35,Storage:37,Stricken:20,Stun:58,Suppress:60,'Sure Shot':78,Throttle:48,Toxin:103,Warlord:81,Weaken:46,'Wind-up':76,Wither:42};
 
-  const state = { rows: new Map(), busy: false, timer: null, assessed: 0, errors: 0 };
+  const state = { rows: new Map(), busy: false, scanningAll: false, stopRequested: false, timer: null, assessed: 0, errors: 0, page: 0 };
   const $ = (id) => document.getElementById(id);
   const money = (n) => Number.isFinite(n) ? '$' + Math.round(n).toLocaleString() : '—';
   const number = (v) => { const n = Number(String(v ?? '').replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : null; };
@@ -37,6 +37,9 @@
       li[data-kabf]{position:relative} .kabf-badge{margin:7px 8px;padding:7px 9px;border-radius:8px;background:#1c2636;border-left:4px solid #718096;font:12px/1.35 Arial,sans-serif;color:#eaf0f8}
       .kabf-good{border-left-color:#3bc98b;color:#86efc0}.kabf-bad{border-left-color:#e55262;color:#ff9ba6}.kabf-wait{border-left-color:#e7b24a;color:#f4d284}
       li.kabf-hidden{display:none!important} li.kabf-best{box-shadow:inset 4px 0 #3bc98b}
+      #kabf-results{position:fixed;inset:5vh 3vw;z-index:2147483646;background:#0d131e;border:1px solid #46546d;border-radius:14px;color:#fff;box-shadow:0 12px 45px #000;display:none;flex-direction:column;overflow:hidden;font:13px/1.4 Arial,sans-serif}
+      #kabf-results.open{display:flex} #kabf-results .head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:#171f2e;font-weight:800} #kabf-results .head button{width:auto;min-height:34px;margin:0;padding:5px 12px}
+      #kabf-results-list{padding:10px;overflow:auto;display:grid;gap:8px}.kabf-result{background:#171f2e;border:1px solid #344158;border-radius:10px;padding:10px}.kabf-result.good{border-left:4px solid #3bc98b}.kabf-result .title{font-weight:800;font-size:14px}.kabf-result .meta{color:#aab4c5;margin-top:3px}.kabf-result .deal{color:#86efc0;font-weight:800;margin-top:5px}.kabf-result .waiting{color:#f4d284;margin-top:5px}
     `; document.head.appendChild(style);
   }
 
@@ -44,19 +47,23 @@
     if ($('kabf')) return;
     const box=document.createElement('details'); box.id='kabf'; box.open=true;
     box.innerHTML=`<summary>🐙 Kraken Auction Bargain Finder</summary><div class="body">
-      <label>Minimum saving<input id="kabf-saving" type="number" inputmode="decimal" value="0" placeholder="% below median"></label>
-      <label>Maximum current bid<input id="kabf-max" type="number" inputmode="numeric" placeholder="Any price"></label>
-      <label>Weapon<input id="kabf-weapon" placeholder="All weapons"></label>
+      <label>Weapon names<input id="kabf-weapon" placeholder="e.g. ArmaLite, Minigun"></label>
       <label>Bonus<select id="kabf-bonus"><option value="">All bonuses</option>${Object.keys(BONUS_IDS).sort().map(x=>`<option>${x}</option>`).join('')}</select></label>
-      <label>Minimum damage<input id="kabf-damage" type="number" inputmode="decimal" placeholder="Any"></label>
-      <label>Minimum accuracy<input id="kabf-accuracy" type="number" inputmode="decimal" placeholder="Any"></label>
-      <label class="wide">Sort<select id="kabf-sort"><option value="saving">Biggest saving first</option><option value="quality">Closest-quality evidence first</option><option value="price">Lowest current bid</option><option value="ending">Torn's current order</option></select></label>
-      <button class="wide" id="kabf-assess">Assess visible auctions</button>
+      <button class="wide" id="kabf-assess">Search every auction page</button>
+      <button class="wide" id="kabf-show">Show matching auctions</button>
+      <button class="wide" id="kabf-stop" style="display:none;background:#4a5568">Stop after this page</button>
     </div><div id="kabf-status">Waiting for weapon auctions…</div>`;
     const list=panel.querySelector('div.items-list-wrap'); panel.insertBefore(box,list||panel.firstChild);
-    ['kabf-saving','kabf-max','kabf-weapon','kabf-bonus','kabf-damage','kabf-accuracy','kabf-sort'].forEach(id=>$(id).addEventListener(id==='kabf-sort'||id==='kabf-bonus'?'change':'input',applyFilters));
+    ['kabf-weapon','kabf-bonus'].forEach(id=>$(id).addEventListener(id==='kabf-bonus'?'change':'input',renderResults));
     $('kabf-assess').addEventListener('click', assessVisible);
+    $('kabf-show').addEventListener('click',()=>{renderResults();$('kabf-results').classList.add('open');});
+    $('kabf-stop').addEventListener('click',()=>{state.stopRequested=true;$('kabf-status').textContent='Stopping after the current page…';});
+    if(!$('kabf-results')){const results=document.createElement('section');results.id='kabf-results';results.innerHTML='<div class="head"><span>🐙 Matching Auction Weapons</span><button id="kabf-close">Close</button></div><div id="kabf-results-list"></div>';document.body.appendChild(results);$('kabf-close').addEventListener('click',()=>results.classList.remove('open'));}
   }
+
+  function endTimeToEpoch(title){const m=String(title||'').match(/(\d{2}):(\d{2}):(\d{2})\s*-\s*(\d{2})\/(\d{2})\/(\d{2})/);if(!m)return null;return Math.floor(Date.UTC(2000+Number(m[6]),Number(m[5])-1,Number(m[4]),Number(m[1]),Number(m[2]),Number(m[3]))/1000);}
+  function remaining(r){return r.endEpoch===null?null:r.endEpoch-Math.floor(Date.now()/1000);}
+  function remainingText(seconds){if(seconds===null)return 'Unknown end time';if(seconds<=0)return 'Ended';const h=Math.floor(seconds/3600),m=Math.floor((seconds%3600)/60),s=seconds%60;return h?`${h}h ${m}m remaining`:`${m}m ${s}s remaining`;}
 
   function parsePrice(li) {
     const candidates=['.price-wrap','.price','.bid-wrap','.current-bid','.amount'];
@@ -71,9 +78,12 @@
       const hover=li.querySelector('span.item-hover');
       const uid=hover?.getAttribute('armoury'); const itemId=number(hover?.getAttribute('item'));
       if(!uid||!itemId)return;
-      const old=state.rows.get(uid)||{};
-      state.rows.set(uid,{...old,uid,itemId,li,price:parsePrice(li),originalIndex:index});
+      const old=state.rows.get(uid)||{},timeEl=li.querySelector('div.time-wrap span[title], [class*="time"] span[title], span[title*="Ends"]'),endEpoch=endTimeToEpoch(timeEl?.getAttribute('title'));
+      const row={...old,uid,itemId,li,price:parsePrice(li),endEpoch,originalIndex:index,page:state.page||1};
+      if(row.result?.median&&row.price!==null)row.result.diff=(row.price-row.result.median)*100/row.result.median;
+      state.rows.set(uid,row);
       li.dataset.kabf=uid;
+      if(row.result||row.error)renderBadge(row);
     });
     updateStatus();
   }
@@ -118,28 +128,64 @@
     r.li.classList.toggle('kabf-best',x.diff<=-10);
   }
 
-  async function assessVisible() {
-    if(state.busy)return; state.busy=true; state.assessed=0; state.errors=0; $('kabf-assess').disabled=true;
-    try{
-      scrape(); const rows=[...state.rows.values()].filter(r=>r.li.isConnected);
+  async function assessPage(rows) {
       await enrich(rows);
       for(let i=0;i<rows.length;i++){
-        const r=rows[i]; $('kabf-status').textContent=`Assessing ${i+1} of ${rows.length}: ${r.name||'weapon'}…`;
+        const r=rows[i];
+        if(!matchesSearch(r))continue;
+        if(remaining(r)===null||remaining(r)>1800||remaining(r)<=0)continue;
+        if(r.result&&!r.error){renderBadge(r);continue;}
+        $('kabf-status').textContent=`Page ${state.page}: bargain-checking ${i+1} of ${rows.length} · ${state.assessed} ending soon…`;
         try{const data=await history(r),sales=comparableSales(r,data),prices=sales.map(x=>x._price),med=median(prices),closest=sales.find(x=>r.quality!==null&&x._quality!==null);r.result={median:med,count:sales.length,diff:med&&r.price!==null?((r.price-med)*100/med):null,qualityGap:closest?Math.abs(closest._quality-r.quality):null};r.error=null;state.assessed++;}
         catch(e){r.error='Assessment unavailable: '+e.message;state.errors++;}
         renderBadge(r); await new Promise(resolve=>setTimeout(resolve,120));
       }
-      applyFilters();
-    } catch(e){$('kabf-status').textContent='Could not read auction details: '+e.message;}
-    finally{state.busy=false;$('kabf-assess').disabled=false;updateStatus();}
+      renderResults();
   }
 
-  function applyFilters() {
-    const min=number($('kabf-saving')?.value)||0,max=number($('kabf-max')?.value),weapon=($('kabf-weapon')?.value||'').toLowerCase(),bonus=$('kabf-bonus')?.value||'',dmg=number($('kabf-damage')?.value),acc=number($('kabf-accuracy')?.value),sort=$('kabf-sort')?.value;
-    const rows=[...state.rows.values()].filter(r=>r.li.isConnected);
-    rows.forEach(r=>{const saving=r.result?.diff==null?null:-r.result.diff,visible=(!weapon||(r.name||'').toLowerCase().includes(weapon))&&(!bonus||(r.bonuses||[]).some(b=>(b.title||b.name)===bonus))&&(max===null||r.price<=max)&&(dmg===null||r.damage>=dmg)&&(acc===null||r.accuracy>=acc)&&(min<=0||saving>=min);r.li.classList.toggle('kabf-hidden',!visible);});
-    if(sort!=='ending'){const list=rows[0]?.li.parentElement;if(list){rows.sort((a,b)=>sort==='price'?(a.price??Infinity)-(b.price??Infinity):sort==='quality'?(a.result?.qualityGap??Infinity)-(b.result?.qualityGap??Infinity):(a.result?.diff??Infinity)-(b.result?.diff??Infinity));rows.forEach(r=>list.appendChild(r.li));}}
+  function currentRows(){return [...state.rows.values()].filter(r=>r.li.isConnected);}
+  function pageFingerprint(){return currentRows().map(r=>r.uid).sort().join('|');}
+  function pager(){return document.querySelector(`${PANEL_SELECTOR} div.pagination-wrap`);}
+  function usable(a){return a&&a.offsetParent!==null&&!a.matches('.disabled,[aria-disabled="true"]');}
+  function nextPageLink(){
+    const p=pager();if(!p)return null;
+    const direct=[...p.querySelectorAll('a')].find(a=>usable(a)&&(/next/i.test(`${a.className} ${a.title} ${a.getAttribute('aria-label')||''}`)||/^[›»>]$/.test(a.textContent.trim())));
+    if(direct)return direct;
+    const active=p.querySelector('.active,[aria-current="page"]');
+    if(active){let n=active.nextElementSibling;while(n){const a=n.matches?.('a')?n:n.querySelector?.('a');if(usable(a))return a;n=n.nextElementSibling;}}
+    return null;
   }
+  function firstPageLink(){
+    const p=pager();if(!p)return null;
+    return [...p.querySelectorAll('a')].find(a=>usable(a)&&(/^1$/.test(a.textContent.trim())||/[?&#](start|page)=0(?:&|$)/.test(a.getAttribute('href')||'')))||null;
+  }
+  function waitForDifferentPage(before,timeout=15000){return new Promise((resolve,reject)=>{const started=Date.now(),tick=()=>{scrape();const now=pageFingerprint();if(now&&now!==before)return resolve();if(Date.now()-started>timeout)return reject(new Error('Torn did not load the next auction page'));setTimeout(tick,250);};setTimeout(tick,250);});}
+  async function clickAndWait(link){const before=pageFingerprint();link.click();await waitForDifferentPage(before);}
+
+  async function assessVisible() {
+    if(state.busy)return; state.busy=true; state.scanningAll=true;state.stopRequested=false;state.assessed=0;state.errors=0;state.page=0;document.querySelectorAll('.kabf-badge').forEach(x=>x.remove());document.querySelectorAll('.kabf-best').forEach(x=>x.classList.remove('kabf-best'));state.rows.clear();$('kabf-assess').disabled=true;$('kabf-stop').style.display='block';
+    try{
+      scrape();
+      const first=firstPageLink();if(first){$('kabf-status').textContent='Opening auction page 1…';await clickAndWait(first);}
+      const visited=new Set();
+      while(!state.stopRequested){
+        state.page++;scrape();const fingerprint=pageFingerprint();if(!fingerprint||visited.has(fingerprint))break;visited.add(fingerprint);
+        await assessPage(currentRows());
+        if(state.stopRequested)break;
+        const next=nextPageLink();if(!next)break;
+        $('kabf-status').textContent=`Page ${state.page} complete · opening the next auction page…`;
+        await clickAndWait(next);
+      }
+      const matches=matchingRows().length,soon=[...state.rows.values()].filter(r=>remaining(r)!==null&&remaining(r)>0&&remaining(r)<=1800).length;
+      $('kabf-status').textContent=`Search complete: ${state.page} page${state.page===1?'':'s'} · ${state.rows.size} auctions indexed · ${matches} match${matches===1?'':'es'} · ${soon} ending within 30 minutes.`;
+      renderResults();$('kabf-results').classList.add('open');
+    } catch(e){$('kabf-status').textContent='Full scan stopped: '+e.message;}
+    finally{state.busy=false;state.scanningAll=false;$('kabf-assess').disabled=false;$('kabf-stop').style.display='none';renderResults();}
+  }
+
+  function matchesSearch(r){const terms=($('kabf-weapon')?.value||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean),bonus=$('kabf-bonus')?.value||'';return (!terms.length||terms.some(x=>(r.name||'').toLowerCase().includes(x)))&&(!bonus||(r.bonuses||[]).some(b=>(b.title||b.name)===bonus));}
+  function matchingRows(){return [...state.rows.values()].filter(matchesSearch).sort((a,b)=>(remaining(a)??Infinity)-(remaining(b)??Infinity));}
+  function renderResults(){const list=$('kabf-results-list');if(!list)return;const rows=matchingRows();list.innerHTML=rows.length?rows.map(r=>{const rem=remaining(r),diff=r.result?.diff,deal=diff==null?(rem!==null&&rem<=1800&&rem>0?'Bargain check pending':'Bargain check begins inside 30 minutes'):`${Math.abs(diff).toFixed(1)}% ${diff<0?'below':'above'} historical median`;return `<article class="kabf-result ${diff<0?'good':''}"><div class="title">${escapeHtml(r.name||'Loading weapon…')}</div><div class="meta">${escapeHtml((r.bonuses||[]).map(b=>(b.title||b.name)+(b.value!=null?' '+b.value+'%':'')).join(', ')||'Loading bonuses…')} · Page ${r.page}<br>${remainingText(rem)} · Current bid ${money(r.price)}</div><div class="${diff==null?'waiting':'deal'}">${deal}${r.result?.median?` · median ${money(r.result.median)}`:''}</div></article>`;}).join(''):'<div class="kabf-result">No indexed auctions match those weapon and bonus choices.</div>';}
 
   function updateStatus(){if(!$('kabf-status')||state.busy)return;const visible=[...state.rows.values()].filter(r=>r.li.isConnected).length;$('kabf-status').textContent=`${visible} visible weapon auction${visible===1?'':'s'} · ${state.assessed} assessed${state.errors?` · ${state.errors} error${state.errors===1?'':'s'}`:''}`;}
   function schedule(){clearTimeout(state.timer);state.timer=setTimeout(scrape,450);}
