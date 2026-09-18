@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.8.0
+// @version      0.8.1
 // @description  Adds ranked weapon and armor bargain assessment, searching and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -18,8 +18,11 @@
   const PANEL_SELECTOR = '.tabContent[data-itemtype="weapons"], .tabContent[data-itemtype="armor"]';
   const ROW_SELECTOR = 'div.items-list-wrap > ul.items-list > li';
   const BONUS_IDS = {Achilles:50,Assassinate:72,Backstab:52,Berserk:54,Bleed:57,Blindfire:33,Blindside:51,Bloodlust:85,Comeback:67,Conserve:55,Cripple:45,Crusher:49,Cupid:47,Deadeye:63,Deadly:62,Demoralize:36,Disarm:86,'Double Tap':105,'Double-edged':74,Empower:87,Eviscerate:56,Execute:75,Expose:1,Finale:82,Focus:79,Freeze:38,Frenzy:80,Fury:64,Grace:53,Hazardous:34,'Home run':83,Immutable:115,Impassable:26,Impenetrable:17,Imperviable:22,Impregnable:15,Insurmountable:92,Invulnerable:91,Irradiate:102,Irrepressible:121,Kinetokinesis:112,Lacerate:89,Motivation:61,Paralyze:59,Parry:84,Penetrate:101,Plunder:21,Powerful:68,Proficience:14,Puncture:66,Quicken:88,'Radiation Protection':90,Rage:65,Revitalize:41,Roshambo:43,Shock:120,Slow:44,Smash:104,Smurf:73,Specialist:71,Spray:35,Storage:37,Stricken:20,Stun:58,Suppress:60,'Sure Shot':78,Throttle:48,Toxin:103,Warlord:81,Weaken:46,'Wind-up':76,Wither:42};
+  const ARMOR_ATTRIBUTE_NAMES=['Immutable','Impassable','Impenetrable','Imperviable','Impregnable','Insurmountable','Invulnerable','Irrepressible','Kinetokinesis','Radiation Protection'];
+  const ARMOR_SETS=['Assault','Dune','EOD','Riot','Sentinel'];
+  const WEAPON_BONUS_NAMES=Object.keys(BONUS_IDS).filter(x=>!ARMOR_ATTRIBUTE_NAMES.includes(x)).sort();
 
-  const state = { rows: new Map(), weaponCatalogue: [], catalogueLoading: false, busy: false, hydrating: false, scanningAll: false, stopRequested: false, timer: null, hydrateTimer: null, assessed: 0, errors: 0, page: 0 };
+  const state = { rows: new Map(), weaponCatalogue: [], armorCatalogue: [], activeMode: null, selections:{weapon:{items:[],bonuses:[]},armor:{items:[],bonuses:[]}}, catalogueLoading: false, busy: false, hydrating: false, scanningAll: false, stopRequested: false, timer: null, hydrateTimer: null, assessed: 0, errors: 0, page: 0 };
   const $ = (id) => document.getElementById(id);
   const money = (n) => Number.isFinite(n) ? '$' + Math.round(n).toLocaleString() : '—';
   const number = (v) => { if(v===null||v===undefined||String(v).trim()==='')return null;const n = Number(String(v).replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : null; };
@@ -47,29 +50,33 @@
   }
 
   function auctionPanel(){const panels=[...document.querySelectorAll(PANEL_SELECTOR)];return panels.find(p=>p.offsetParent!==null&&!p.hidden&&getComputedStyle(p).display!=='none')||panels.find(p=>p.classList.contains('active'))||panels[0]||null;}
+  function panelMode(panel){return panel?.dataset.itemtype==='armor'?'armor':'weapon';}
 
   function makePanel(panel) {
-    if ($('kabf')){const box=$('kabf'),list=panel.querySelector('div.items-list-wrap');if(box.parentElement!==panel)panel.insertBefore(box,list||panel.firstChild);return;}
+    if ($('kabf')){const box=$('kabf'),list=panel.querySelector('div.items-list-wrap');if(box.parentElement!==panel)panel.insertBefore(box,list||panel.firstChild);switchSearchMode(panelMode(panel));return;}
     const box=document.createElement('details'); box.id='kabf'; box.open=true;
     box.innerHTML=`<summary>🐙 Kraken Auction Bargain Finder</summary><div class="body">
-      <label>Weapons / armor<details class="multi" id="kabf-weapon-picker"><summary id="kabf-weapon-summary">All items</summary><div class="multi-options" id="kabf-weapon-options"></div></details></label>
-      <label>Bonuses<details class="multi" id="kabf-bonus-picker"><summary id="kabf-bonus-summary">All bonuses</summary><div class="multi-options" id="kabf-bonus-options">${Object.keys(BONUS_IDS).sort().map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}">${escapeHtml(x)}</label>`).join('')}</div></details></label>
+      <label><span id="kabf-item-label">Weapons</span><details class="multi" id="kabf-weapon-picker"><summary id="kabf-weapon-summary">All weapons</summary><div class="multi-options" id="kabf-weapon-options"></div></details></label>
+      <label><span id="kabf-bonus-label">Bonuses</span><details class="multi" id="kabf-bonus-picker"><summary id="kabf-bonus-summary">All bonuses</summary><div class="multi-options" id="kabf-bonus-options"></div></details></label>
       <button class="wide" id="kabf-assess">Search every auction page</button>
       <button class="wide" id="kabf-show">Show matching auctions</button>
       <button class="wide" id="kabf-stop" style="display:none;background:#4a5568">Stop after this page</button>
     </div><div id="kabf-status">Waiting for weapon auctions…</div>`;
     const list=panel.querySelector('div.items-list-wrap'); panel.insertBefore(box,list||panel.firstChild);
-    ['kabf-weapon-options','kabf-bonus-options'].forEach(id=>$(id).addEventListener('change',async()=>{updatePickerSummaries();renderResults();if(!state.busy){await loadMatchingHistories();renderResults();}}));
+    ['kabf-weapon-options','kabf-bonus-options'].forEach(id=>$(id).addEventListener('change',async()=>{saveCurrentSelections();updatePickerSummaries();renderResults();if(!state.busy){await loadMatchingHistories();renderResults();}}));
     $('kabf-assess').addEventListener('click', assessVisible);
     $('kabf-show').addEventListener('click',async()=>{if(!state.busy)await loadMatchingHistories();renderResults();$('kabf-results').classList.add('open');});
     $('kabf-stop').addEventListener('click',()=>{state.stopRequested=true;$('kabf-status').textContent='Stopping after the current page…';});
     if(!$('kabf-results')){const results=document.createElement('section');results.id='kabf-results';results.innerHTML='<div class="head"><span>🐙 Matching Auction Items</span><button id="kabf-close">Close</button></div><div class="sortbar"><label for="kabf-result-sort">Sort</label><select id="kabf-result-sort"><option value="end">Ending soonest</option><option value="bonus">Highest bonus %</option><option value="damage">Highest damage / armor</option><option value="quality">Highest quality</option></select></div><div id="kabf-results-list"></div>';document.body.appendChild(results);$('kabf-close').addEventListener('click',()=>results.classList.remove('open'));$('kabf-result-sort').addEventListener('change',renderResults);$('kabf-results-list').addEventListener('click',async e=>{const open=e.target.closest('[data-kabf-open]'),historyButton=e.target.closest('[data-kabf-history]');if(open){e.preventDefault();await openAuctionCard(open.dataset.kabfOpen);}if(historyButton){e.preventDefault();const r=state.rows.get(historyButton.dataset.kabfHistory);if(r){historyButton.disabled=true;historyButton.textContent='Loading history…';await assessOne(r,true);renderResults();}}});}
     loadWeaponCatalogue();
+    switchSearchMode(panelMode(panel));
   }
 
   function selectedValues(id){return [...($(id)?.querySelectorAll('input:checked')||[])].map(x=>x.value);}
   function pickerText(values,empty){return values.length?values.join(', '):empty;}
-  function updatePickerSummaries(){$('kabf-weapon-summary').textContent=pickerText(selectedValues('kabf-weapon-options'),'All items');$('kabf-bonus-summary').textContent=pickerText(selectedValues('kabf-bonus-options'),'All bonuses');}
+  function updatePickerSummaries(){const armor=state.activeMode==='armor';$('kabf-weapon-summary').textContent=pickerText(selectedValues('kabf-weapon-options'),armor?'All armor':'All weapons');$('kabf-bonus-summary').textContent=pickerText(selectedValues('kabf-bonus-options'),armor?'All armor sets':'All bonuses');}
+  function saveCurrentSelections(){if(!state.activeMode)return;state.selections[state.activeMode]={items:selectedValues('kabf-weapon-options'),bonuses:selectedValues('kabf-bonus-options')};}
+  function switchSearchMode(mode){if(!$('kabf-weapon-options')||state.activeMode===mode)return;saveCurrentSelections();state.activeMode=mode;$('kabf-item-label').textContent=mode==='armor'?'Armor':'Weapons';$('kabf-bonus-label').textContent=mode==='armor'?'Armor sets':'Bonuses';refreshWeaponOptions();refreshBonusOptions();}
 
   function endTimeToEpoch(title){const m=String(title||'').match(/(\d{2}):(\d{2}):(\d{2})\s*-\s*(\d{2})\/(\d{2})\/(\d{2})/);if(!m)return null;return Math.floor(Date.UTC(2000+Number(m[6]),Number(m[5])-1,Number(m[4]),Number(m[1]),Number(m[2]),Number(m[3]))/1000);}
   function remaining(r){return r.endEpoch===null?null:r.endEpoch-Math.floor(Date.now()/1000);}
@@ -114,8 +121,9 @@
     refreshWeaponOptions();
   }
 
-  function refreshWeaponOptions(){const box=$('kabf-weapon-options');if(!box)return;const selected=new Set(selectedValues('kabf-weapon-options')),names=[...new Set([...state.weaponCatalogue,...state.rows.values()].map(r=>typeof r==='string'?r:r.name).filter(Boolean))];selected.forEach(x=>{if(!names.includes(x))names.push(x);});names.sort((a,b)=>a.localeCompare(b));box.innerHTML=names.map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}" ${selected.has(x)?'checked':''}>${escapeHtml(x)}</label>`).join('');updatePickerSummaries();}
-  async function loadWeaponCatalogue(){if(state.catalogueLoading||state.weaponCatalogue.length)return;state.catalogueLoading=true;try{const payloads=await Promise.all(['Primary','Secondary','Melee','Defensive'].map(cat=>pdaGet(`https://api.torn.com/v2/torn/items?cat=${encodeURIComponent(cat)}&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`)));state.weaponCatalogue=[...new Set(payloads.flatMap(p=>(p.items||[]).map(x=>x.name).filter(Boolean)))];refreshWeaponOptions();}catch(_){refreshWeaponOptions();}finally{state.catalogueLoading=false;}}
+  function refreshWeaponOptions(){const box=$('kabf-weapon-options');if(!box||!state.activeMode)return;const selected=new Set(state.selections[state.activeMode].items),catalogue=state.activeMode==='armor'?state.armorCatalogue:state.weaponCatalogue,names=[...new Set([...catalogue,...[...state.rows.values()].filter(r=>r.itemType===state.activeMode).map(r=>r.name)].filter(Boolean))];selected.forEach(x=>{if(!names.includes(x))names.push(x);});names.sort((a,b)=>a.localeCompare(b));box.innerHTML=names.map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}" ${selected.has(x)?'checked':''}>${escapeHtml(x)}</label>`).join('');updatePickerSummaries();}
+  function refreshBonusOptions(){const box=$('kabf-bonus-options');if(!box||!state.activeMode)return;const selected=new Set(state.selections[state.activeMode].bonuses),names=state.activeMode==='armor'?ARMOR_SETS:WEAPON_BONUS_NAMES;box.innerHTML=names.map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}" ${selected.has(x)?'checked':''}>${escapeHtml(x)}</label>`).join('');updatePickerSummaries();}
+  async function loadWeaponCatalogue(){if(state.catalogueLoading||(state.weaponCatalogue.length&&state.armorCatalogue.length))return;state.catalogueLoading=true;try{const weaponPayloads=await Promise.all(['Primary','Secondary','Melee'].map(cat=>pdaGet(`https://api.torn.com/v2/torn/items?cat=${encodeURIComponent(cat)}&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`))),armorPayload=await pdaGet(`https://api.torn.com/v2/torn/items?cat=Defensive&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`);state.weaponCatalogue=[...new Set(weaponPayloads.flatMap(p=>(p.items||[]).map(x=>x.name).filter(Boolean)))];state.armorCatalogue=[...new Set((armorPayload.items||[]).map(x=>x.name).filter(Boolean))];refreshWeaponOptions();}catch(_){refreshWeaponOptions();}finally{state.catalogueLoading=false;}}
 
   function requestBody(r,exact=true) {
     const body={limit:100,offset:0,sort_by:'timestamp',sort_order:'desc',item_name:r.name};
@@ -239,7 +247,7 @@
     finally{state.busy=false;state.scanningAll=false;$('kabf-assess').disabled=false;$('kabf-stop').style.display='none';renderResults();$('kabf-results')?.classList.add('open');}
   }
 
-  function matchesSearch(r){const weapons=selectedValues('kabf-weapon-options'),bonuses=selectedValues('kabf-bonus-options'),itemBonuses=(r.bonuses||[]).map(b=>b.title||b.name);return (!weapons.length||weapons.includes(r.name))&&(!bonuses.length||bonuses.some(x=>itemBonuses.includes(x)));}
+  function matchesSearch(r){const items=selectedValues('kabf-weapon-options'),choices=selectedValues('kabf-bonus-options');if(r.itemType!==state.activeMode)return false;const choiceMatch=state.activeMode==='armor'?(!choices.length||choices.some(x=>(r.name||'').toLowerCase().includes(x.toLowerCase()))):(!choices.length||choices.some(x=>(r.bonuses||[]).some(b=>(b.title||b.name)===x)));return (!items.length||items.includes(r.name))&&choiceMatch;}
   function maxBonus(r){return Math.max(0,...(r.bonuses||[]).map(b=>number(b.value??b.percentage??b.percent)||0));}
   function combatStat(r){return r.itemType==='armor'?r.armor:r.damage;}
   function matchingRows(){const sort=$('kabf-result-sort')?.value||'end';return [...state.rows.values()].filter(matchesSearch).sort((a,b)=>sort==='bonus'?maxBonus(b)-maxBonus(a):sort==='damage'?(combatStat(b)??-Infinity)-(combatStat(a)??-Infinity):sort==='quality'?(b.quality??-Infinity)-(a.quality??-Infinity):(remaining(a)??Infinity)-(remaining(b)??Infinity));}
