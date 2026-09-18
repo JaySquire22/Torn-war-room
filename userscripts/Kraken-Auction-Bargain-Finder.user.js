@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.7.1
-// @description  Adds ranked-weapon bargain assessment, filters and sorting to Torn's Auction House in Torn PDA.
+// @version      0.8.0
+// @description  Adds ranked weapon and armor bargain assessment, searching and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
 // @run-at       document-end
@@ -15,9 +15,9 @@
   const HISTORY_URL = 'https://btrmmuuoofbonmuwrkzg.supabase.co/functions/v1/search-auctions';
   const HISTORY_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ0cm1tdXVvb2Zib25tdXdya3pnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg4NTEzMTgsImV4cCI6MjA4NDQyNzMxOH0.E-s0k46BORXLICAvxtEpqoM3Qmh4-TRLaJAwXO6wJTY';
   const CACHE_MS = 30 * 60 * 1000;
-  const PANEL_SELECTOR = '.tabContent[data-itemtype="weapons"]';
+  const PANEL_SELECTOR = '.tabContent[data-itemtype="weapons"], .tabContent[data-itemtype="armor"]';
   const ROW_SELECTOR = 'div.items-list-wrap > ul.items-list > li';
-  const BONUS_IDS = {Achilles:50,Assassinate:72,Backstab:52,Berserk:54,Bleed:57,Blindfire:33,Blindside:51,Bloodlust:85,Comeback:67,Conserve:55,Cripple:45,Crusher:49,Cupid:47,Deadeye:63,Deadly:62,Demoralize:36,Disarm:86,'Double Tap':105,'Double-edged':74,Empower:87,Eviscerate:56,Execute:75,Expose:1,Finale:82,Focus:79,Freeze:38,Frenzy:80,Fury:64,Grace:53,Hazardous:34,'Home run':83,Irradiate:102,Lacerate:89,Motivation:61,Paralyze:59,Parry:84,Penetrate:101,Plunder:21,Powerful:68,Proficience:14,Puncture:66,Quicken:88,Rage:65,Revitalize:41,Roshambo:43,Shock:120,Slow:44,Smash:104,Smurf:73,Specialist:71,Spray:35,Storage:37,Stricken:20,Stun:58,Suppress:60,'Sure Shot':78,Throttle:48,Toxin:103,Warlord:81,Weaken:46,'Wind-up':76,Wither:42};
+  const BONUS_IDS = {Achilles:50,Assassinate:72,Backstab:52,Berserk:54,Bleed:57,Blindfire:33,Blindside:51,Bloodlust:85,Comeback:67,Conserve:55,Cripple:45,Crusher:49,Cupid:47,Deadeye:63,Deadly:62,Demoralize:36,Disarm:86,'Double Tap':105,'Double-edged':74,Empower:87,Eviscerate:56,Execute:75,Expose:1,Finale:82,Focus:79,Freeze:38,Frenzy:80,Fury:64,Grace:53,Hazardous:34,'Home run':83,Immutable:115,Impassable:26,Impenetrable:17,Imperviable:22,Impregnable:15,Insurmountable:92,Invulnerable:91,Irradiate:102,Irrepressible:121,Kinetokinesis:112,Lacerate:89,Motivation:61,Paralyze:59,Parry:84,Penetrate:101,Plunder:21,Powerful:68,Proficience:14,Puncture:66,Quicken:88,'Radiation Protection':90,Rage:65,Revitalize:41,Roshambo:43,Shock:120,Slow:44,Smash:104,Smurf:73,Specialist:71,Spray:35,Storage:37,Stricken:20,Stun:58,Suppress:60,'Sure Shot':78,Throttle:48,Toxin:103,Warlord:81,Weaken:46,'Wind-up':76,Wither:42};
 
   const state = { rows: new Map(), weaponCatalogue: [], catalogueLoading: false, busy: false, hydrating: false, scanningAll: false, stopRequested: false, timer: null, hydrateTimer: null, assessed: 0, errors: 0, page: 0 };
   const $ = (id) => document.getElementById(id);
@@ -46,11 +46,13 @@
     `; document.head.appendChild(style);
   }
 
+  function auctionPanel(){const panels=[...document.querySelectorAll(PANEL_SELECTOR)];return panels.find(p=>p.offsetParent!==null&&!p.hidden&&getComputedStyle(p).display!=='none')||panels.find(p=>p.classList.contains('active'))||panels[0]||null;}
+
   function makePanel(panel) {
-    if ($('kabf')) return;
+    if ($('kabf')){const box=$('kabf'),list=panel.querySelector('div.items-list-wrap');if(box.parentElement!==panel)panel.insertBefore(box,list||panel.firstChild);return;}
     const box=document.createElement('details'); box.id='kabf'; box.open=true;
     box.innerHTML=`<summary>🐙 Kraken Auction Bargain Finder</summary><div class="body">
-      <label>Weapons<details class="multi" id="kabf-weapon-picker"><summary id="kabf-weapon-summary">All weapons</summary><div class="multi-options" id="kabf-weapon-options"></div></details></label>
+      <label>Weapons / armor<details class="multi" id="kabf-weapon-picker"><summary id="kabf-weapon-summary">All items</summary><div class="multi-options" id="kabf-weapon-options"></div></details></label>
       <label>Bonuses<details class="multi" id="kabf-bonus-picker"><summary id="kabf-bonus-summary">All bonuses</summary><div class="multi-options" id="kabf-bonus-options">${Object.keys(BONUS_IDS).sort().map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}">${escapeHtml(x)}</label>`).join('')}</div></details></label>
       <button class="wide" id="kabf-assess">Search every auction page</button>
       <button class="wide" id="kabf-show">Show matching auctions</button>
@@ -61,13 +63,13 @@
     $('kabf-assess').addEventListener('click', assessVisible);
     $('kabf-show').addEventListener('click',async()=>{if(!state.busy)await loadMatchingHistories();renderResults();$('kabf-results').classList.add('open');});
     $('kabf-stop').addEventListener('click',()=>{state.stopRequested=true;$('kabf-status').textContent='Stopping after the current page…';});
-    if(!$('kabf-results')){const results=document.createElement('section');results.id='kabf-results';results.innerHTML='<div class="head"><span>🐙 Matching Auction Weapons</span><button id="kabf-close">Close</button></div><div class="sortbar"><label for="kabf-result-sort">Sort</label><select id="kabf-result-sort"><option value="end">Ending soonest</option><option value="bonus">Highest bonus %</option><option value="damage">Highest damage</option><option value="quality">Highest quality</option></select></div><div id="kabf-results-list"></div>';document.body.appendChild(results);$('kabf-close').addEventListener('click',()=>results.classList.remove('open'));$('kabf-result-sort').addEventListener('change',renderResults);$('kabf-results-list').addEventListener('click',async e=>{const open=e.target.closest('[data-kabf-open]'),historyButton=e.target.closest('[data-kabf-history]');if(open){e.preventDefault();await openAuctionCard(open.dataset.kabfOpen);}if(historyButton){e.preventDefault();const r=state.rows.get(historyButton.dataset.kabfHistory);if(r){historyButton.disabled=true;historyButton.textContent='Loading history…';await assessOne(r,true);renderResults();}}});}
+    if(!$('kabf-results')){const results=document.createElement('section');results.id='kabf-results';results.innerHTML='<div class="head"><span>🐙 Matching Auction Items</span><button id="kabf-close">Close</button></div><div class="sortbar"><label for="kabf-result-sort">Sort</label><select id="kabf-result-sort"><option value="end">Ending soonest</option><option value="bonus">Highest bonus %</option><option value="damage">Highest damage / armor</option><option value="quality">Highest quality</option></select></div><div id="kabf-results-list"></div>';document.body.appendChild(results);$('kabf-close').addEventListener('click',()=>results.classList.remove('open'));$('kabf-result-sort').addEventListener('change',renderResults);$('kabf-results-list').addEventListener('click',async e=>{const open=e.target.closest('[data-kabf-open]'),historyButton=e.target.closest('[data-kabf-history]');if(open){e.preventDefault();await openAuctionCard(open.dataset.kabfOpen);}if(historyButton){e.preventDefault();const r=state.rows.get(historyButton.dataset.kabfHistory);if(r){historyButton.disabled=true;historyButton.textContent='Loading history…';await assessOne(r,true);renderResults();}}});}
     loadWeaponCatalogue();
   }
 
   function selectedValues(id){return [...($(id)?.querySelectorAll('input:checked')||[])].map(x=>x.value);}
   function pickerText(values,empty){return values.length?values.join(', '):empty;}
-  function updatePickerSummaries(){$('kabf-weapon-summary').textContent=pickerText(selectedValues('kabf-weapon-options'),'All weapons');$('kabf-bonus-summary').textContent=pickerText(selectedValues('kabf-bonus-options'),'All bonuses');}
+  function updatePickerSummaries(){$('kabf-weapon-summary').textContent=pickerText(selectedValues('kabf-weapon-options'),'All items');$('kabf-bonus-summary').textContent=pickerText(selectedValues('kabf-bonus-options'),'All bonuses');}
 
   function endTimeToEpoch(title){const m=String(title||'').match(/(\d{2}):(\d{2}):(\d{2})\s*-\s*(\d{2})\/(\d{2})\/(\d{2})/);if(!m)return null;return Math.floor(Date.UTC(2000+Number(m[6]),Number(m[5])-1,Number(m[4]),Number(m[1]),Number(m[2]),Number(m[3]))/1000);}
   function remaining(r){return r.endEpoch===null?null:r.endEpoch-Math.floor(Date.now()/1000);}
@@ -82,14 +84,14 @@
   }
 
   function scrape() {
-    const panel=document.querySelector(PANEL_SELECTOR); if(!panel)return;
+    const panel=auctionPanel(); if(!panel)return;
     makePanel(panel);
     panel.querySelectorAll(ROW_SELECTOR).forEach((li,index)=>{
       const hover=li.querySelector('span.item-hover');
       const uid=hover?.getAttribute('armoury'); const itemId=number(hover?.getAttribute('item'));
       if(!uid||!itemId)return;
       const old=state.rows.get(uid)||{},timeEl=li.querySelector('div.time-wrap span[title], [class*="time"] span[title], span[title*="Ends"]'),endEpoch=endTimeToEpoch(timeEl?.getAttribute('title'));
-      const row={...old,uid,itemId,li,cardId:li.id||old.cardId||'',price:parsePrice(li),endEpoch,originalIndex:index,page:state.page||1};
+      const row={...old,uid,itemId,li,itemType:panel.dataset.itemtype==='armor'?'armor':'weapon',cardId:li.id||old.cardId||'',price:parsePrice(li),endEpoch,originalIndex:index,page:state.page||1};
       if(row.result?.median&&row.price!==null)row.result.diff=(row.price-row.result.median)*100/row.result.median;
       state.rows.set(uid,row);
       li.dataset.kabf=uid;
@@ -107,13 +109,13 @@
       const batch=rows.slice(i,i+25), uids=batch.map(x=>x.uid).join(',');
       const data=await pdaGet(`https://api.torn.com/v2/torn/${uids}/itemdetails?key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`);
       const details=Array.isArray(data.itemdetails)?data.itemdetails:Object.values(data.itemdetails||{});
-      details.forEach(d=>{const r=state.rows.get(String(d.uid??d.UID)); if(!r)return; const stats=d.stats||{}; Object.assign(r,{name:d.name||'Unknown',type:d.type||'',rarity:d.rarity||'',bonuses:Array.isArray(d.bonuses)?d.bonuses:Object.values(d.bonuses||{}),damage:number(stats.damage??d.damage),accuracy:number(stats.accuracy??d.accuracy),quality:number(d.quality??d.stat_quality??stats.quality)});});
+      details.forEach(d=>{const r=state.rows.get(String(d.uid??d.UID)); if(!r)return; const stats=d.stats||{}; Object.assign(r,{name:d.name||'Unknown',type:d.type||'',rarity:d.rarity||'',bonuses:Array.isArray(d.bonuses)?d.bonuses:Object.values(d.bonuses||{}),damage:number(stats.damage??d.damage),accuracy:number(stats.accuracy??d.accuracy),armor:number(stats.armor??d.armor),quality:number(d.quality??d.stat_quality??stats.quality)});});
     }
     refreshWeaponOptions();
   }
 
   function refreshWeaponOptions(){const box=$('kabf-weapon-options');if(!box)return;const selected=new Set(selectedValues('kabf-weapon-options')),names=[...new Set([...state.weaponCatalogue,...state.rows.values()].map(r=>typeof r==='string'?r:r.name).filter(Boolean))];selected.forEach(x=>{if(!names.includes(x))names.push(x);});names.sort((a,b)=>a.localeCompare(b));box.innerHTML=names.map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}" ${selected.has(x)?'checked':''}>${escapeHtml(x)}</label>`).join('');updatePickerSummaries();}
-  async function loadWeaponCatalogue(){if(state.catalogueLoading||state.weaponCatalogue.length)return;state.catalogueLoading=true;try{const payloads=await Promise.all(['Primary','Secondary','Melee'].map(cat=>pdaGet(`https://api.torn.com/v2/torn/items?cat=${encodeURIComponent(cat)}&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`)));state.weaponCatalogue=[...new Set(payloads.flatMap(p=>(p.items||[]).map(x=>x.name).filter(Boolean)))];refreshWeaponOptions();}catch(_){refreshWeaponOptions();}finally{state.catalogueLoading=false;}}
+  async function loadWeaponCatalogue(){if(state.catalogueLoading||state.weaponCatalogue.length)return;state.catalogueLoading=true;try{const payloads=await Promise.all(['Primary','Secondary','Melee','Defensive'].map(cat=>pdaGet(`https://api.torn.com/v2/torn/items?cat=${encodeURIComponent(cat)}&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`)));state.weaponCatalogue=[...new Set(payloads.flatMap(p=>(p.items||[]).map(x=>x.name).filter(Boolean)))];refreshWeaponOptions();}catch(_){refreshWeaponOptions();}finally{state.catalogueLoading=false;}}
 
   function requestBody(r,exact=true) {
     const body={limit:100,offset:0,sort_by:'timestamp',sort_order:'desc',item_name:r.name};
@@ -129,12 +131,12 @@
   function saleEpoch(s){const raw=s.timestamp??s.sold_at??s.end_time??s.created_at;if(raw==null)return null;if(typeof raw==='number'||/^\d+$/.test(String(raw))) {const n=Number(raw);return n>1e12?Math.floor(n/1000):Math.floor(n);}const parsed=Date.parse(raw);return Number.isFinite(parsed)?Math.floor(parsed/1000):null;}
   function comparableSales(r,data) {
     const cutoff=Math.floor(Date.now()/1000)-(365*24*60*60);
-    const sales=(data.auctions||[]).filter(x=>number(x.price)>0&&exactBonusMatch(r,x)&&saleEpoch(x)!==null&&saleEpoch(x)>=cutoff).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality),_damage:number(x.stat_damage??x.damage),_bonuses:saleBonuses(x)}));
+    const sales=(data.auctions||[]).filter(x=>number(x.price)>0&&exactBonusMatch(r,x)&&saleEpoch(x)!==null&&saleEpoch(x)>=cutoff).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality),_damage:number(x.stat_damage??x.damage),_armor:number(x.stat_armor??x.armor),_bonuses:saleBonuses(x)}));
     sales.sort((a,b)=>{const aq=r.quality!==null&&a._quality!==null?Math.abs(a._quality-r.quality):9999,bq=r.quality!==null&&b._quality!==null?Math.abs(b._quality-r.quality):9999;return aq-bq;});
     return sales.slice(0,20);
   }
 
-  function closestSales(r,data){const cutoff=Math.floor(Date.now()/1000)-(365*24*60*60);const sales=(data.auctions||[]).filter(x=>number(x.price)>0&&sameBonusTypes(r,x)&&saleEpoch(x)!==null&&saleEpoch(x)>=cutoff).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality),_damage:number(x.stat_damage??x.damage),_bonuses:saleBonuses(x),_bonusGap:bonusDistance(r,x)}));sales.sort((a,b)=>a._bonusGap-b._bonusGap||((r.quality!==null&&a._quality!==null?Math.abs(a._quality-r.quality):9999)-(r.quality!==null&&b._quality!==null?Math.abs(b._quality-r.quality):9999)));return sales.slice(0,20);}
+  function closestSales(r,data){const cutoff=Math.floor(Date.now()/1000)-(365*24*60*60);const sales=(data.auctions||[]).filter(x=>number(x.price)>0&&sameBonusTypes(r,x)&&saleEpoch(x)!==null&&saleEpoch(x)>=cutoff).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality),_damage:number(x.stat_damage??x.damage),_armor:number(x.stat_armor??x.armor),_bonuses:saleBonuses(x),_bonusGap:bonusDistance(r,x)}));sales.sort((a,b)=>a._bonusGap-b._bonusGap||((r.quality!==null&&a._quality!==null?Math.abs(a._quality-r.quality):9999)-(r.quality!==null&&b._quality!==null?Math.abs(b._quality-r.quality):9999)));return sales.slice(0,20);}
 
   function cacheKey(r,exact){return `kabf-${exact?'exact':'closest'}12:`+r.name+':'+(r.bonuses||[]).slice(0,2).map(b=>`${b.title||b.name}:${Math.round(number(b.value??b.percentage??b.percent))}`).join('|');}
   async function history(r,exact=true) {
@@ -143,7 +145,7 @@
     localStorage.setItem(key,JSON.stringify({at:Date.now(),data})); return data;
   }
 
-  function salesHtml(x){return (x.sales||[]).slice(0,10).map(s=>`<div class="kabf-sale"><span>DMG ${s._damage??'?'} · Bonus ${s._bonuses?.map(b=>`${b.value}%`).join(' + ')||'?'} · Quality ${s._quality??'?'}%</span><b>${money(s._price)}</b></div>`).join('');}
+  function salesHtml(x){return (x.sales||[]).slice(0,10).map(s=>`<div class="kabf-sale"><span>${Number.isFinite(s._armor)?'ARM '+s._armor:'DMG '+(s._damage??'?')} · Bonus ${s._bonuses?.map(b=>`${b.value}%`).join(' + ')||'?'} · Quality ${s._quality??'?'}%</span><b>${money(s._price)}</b></div>`).join('');}
   function renderBadge(r) {
     if(!r.li?.isConnected)return;
     let badge=r.li.querySelector('.kabf-badge'); if(!badge){badge=document.createElement('div');badge.className='kabf-badge';r.li.appendChild(badge);}const wasOpen=badge.querySelector('details')?.open||false;
@@ -187,7 +189,7 @@
 
   function currentRows(){return [...state.rows.values()].filter(r=>r.li.isConnected);}
   function pageFingerprint(){return currentRows().map(r=>r.uid).sort().join('|');}
-  function pager(){return document.querySelector(`${PANEL_SELECTOR} div.pagination-wrap`);}
+  function pager(){return auctionPanel()?.querySelector('div.pagination-wrap')||null;}
   function usable(a){return a&&!a.matches('.disabled,[aria-disabled="true"]');}
   function nextPageLink(){
     const p=pager();if(!p)return null;
@@ -239,7 +241,8 @@
 
   function matchesSearch(r){const weapons=selectedValues('kabf-weapon-options'),bonuses=selectedValues('kabf-bonus-options'),itemBonuses=(r.bonuses||[]).map(b=>b.title||b.name);return (!weapons.length||weapons.includes(r.name))&&(!bonuses.length||bonuses.some(x=>itemBonuses.includes(x)));}
   function maxBonus(r){return Math.max(0,...(r.bonuses||[]).map(b=>number(b.value??b.percentage??b.percent)||0));}
-  function matchingRows(){const sort=$('kabf-result-sort')?.value||'end';return [...state.rows.values()].filter(matchesSearch).sort((a,b)=>sort==='bonus'?maxBonus(b)-maxBonus(a):sort==='damage'?(b.damage??-Infinity)-(a.damage??-Infinity):sort==='quality'?(b.quality??-Infinity)-(a.quality??-Infinity):(remaining(a)??Infinity)-(remaining(b)??Infinity));}
+  function combatStat(r){return r.itemType==='armor'?r.armor:r.damage;}
+  function matchingRows(){const sort=$('kabf-result-sort')?.value||'end';return [...state.rows.values()].filter(matchesSearch).sort((a,b)=>sort==='bonus'?maxBonus(b)-maxBonus(a):sort==='damage'?(combatStat(b)??-Infinity)-(combatStat(a)??-Infinity):sort==='quality'?(b.quality??-Infinity)-(a.quality??-Infinity):(remaining(a)??Infinity)-(remaining(b)??Infinity));}
   function renderResults(){const list=$('kabf-results-list');if(!list)return;const openUids=new Set([...list.querySelectorAll('details[open]')].map(d=>d.closest('[data-result-uid]')?.dataset.resultUid).filter(Boolean)),rows=matchingRows();list.innerHTML=rows.length?rows.map(r=>{const rem=remaining(r),x=r.result,diff=x?.diff,endingSoon=rem!==null&&rem<=3600&&rem>0,deal=diff==null?(endingSoon?'Bargain check pending':'Load history for comparison'):`${Math.abs(diff).toFixed(1)}% ${diff<0?'below':'above'} historical median`;return `<article class="kabf-result ${diff<0?'good':''}" data-result-uid="${escapeHtml(r.uid)}"><a href="#" class="title" data-kabf-open="${escapeHtml(r.uid)}">${escapeHtml(r.name||'Loading weapon…')}</a><div class="meta">${escapeHtml((r.bonuses||[]).map(b=>(b.title||b.name)+(b.value!=null?' '+b.value+'%':'')).join(', ')||'Loading bonuses…')} · Page ${r.page}<br>${remainingText(rem)} · Current bid ${money(r.price)}</div><div class="${diff==null?'waiting':'deal'}">${x&&!x.exact?'<b style="color:#ff6b78">No exact comparisons</b><br>':''}${deal}${x?`<br>Median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)} · ${x.count} ${x.exact?'exact':'closest'} comparisons`:''}</div>${x?`<details ${openUids.has(r.uid)?'open':''}><summary>Comparable auction sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`:`<button class="kabf-history" data-kabf-history="${escapeHtml(r.uid)}">Load auction history</button>`}<button class="kabf-open" data-kabf-open="${escapeHtml(r.uid)}">Open auction card</button></article>`;}).join(''):'<div class="kabf-result">No indexed auctions match those weapon and bonus choices.</div>';}
 
   function updateStatus(){if(!$('kabf-status')||state.busy)return;const visible=[...state.rows.values()].filter(r=>r.li.isConnected).length;$('kabf-status').textContent=`${visible} visible weapon auction${visible===1?'':'s'} · ${state.assessed} assessed${state.errors?` · ${state.errors} error${state.errors===1?'':'s'}`:''}`;}
