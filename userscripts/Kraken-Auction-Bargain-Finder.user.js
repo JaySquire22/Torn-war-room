@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.8.3
+// @version      0.8.4
 // @description  Adds ranked weapon and armor bargain assessment, searching and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -156,10 +156,12 @@
   function closestSales(r,data){const cutoff=Math.floor(Date.now()/1000)-(365*24*60*60);const sales=(data.auctions||[]).filter(x=>number(x.price)>0&&sameBonusTypes(r,x)&&saleEpoch(x)!==null&&saleEpoch(x)>=cutoff).map(x=>({...x,_price:number(x.price),_quality:number(x.stat_quality??x.quality),_damage:number(x.stat_damage??x.damage),_armor:number(x.stat_armor??x.armor),_bonuses:saleBonuses(x),_bonusGap:bonusDistance(r,x)}));sales.sort((a,b)=>a._bonusGap-b._bonusGap||((r.quality!==null&&a._quality!==null?Math.abs(a._quality-r.quality):9999)-(r.quality!==null&&b._quality!==null?Math.abs(b._quality-r.quality):9999)));return sales.slice(0,20);}
 
   function cacheKey(r,exact){return `kabf-${exact?'exact':'closest'}12:`+r.name+':'+(r.bonuses||[]).slice(0,2).map(b=>`${b.title||b.name}:${Math.round(number(b.value??b.percentage??b.percent))}`).join('|');}
+  function trimHistoryCache(keep=6){const entries=[];for(let i=0;i<localStorage.length;i++){const key=localStorage.key(i);if(!key?.startsWith('kabf-'))continue;let at=0;try{at=JSON.parse(localStorage.getItem(key)||'null')?.at||0;}catch(_){ }entries.push({key,at});}entries.sort((a,b)=>b.at-a.at);entries.slice(keep).forEach(x=>localStorage.removeItem(x.key));}
+  function cacheHistory(key,data){const value=JSON.stringify({at:Date.now(),data});try{localStorage.setItem(key,value);}catch(_){try{trimHistoryCache(4);localStorage.setItem(key,value);}catch(__){/* Caching is optional; never fail an assessment because PDA storage is full. */}}}
   async function history(r,exact=true) {
     const key=cacheKey(r,exact); try{const c=JSON.parse(localStorage.getItem(key)||'null');if(c&&Date.now()-c.at<CACHE_MS)return c.data;}catch(_){ }
     const data=await pdaPost(HISTORY_URL,{'Content-Type':'application/json',apikey:HISTORY_KEY,Authorization:'Bearer '+HISTORY_KEY},JSON.stringify(requestBody(r,exact)));
-    localStorage.setItem(key,JSON.stringify({at:Date.now(),data})); return data;
+    cacheHistory(key,data); return data;
   }
 
   function salesHtml(x){return (x.sales||[]).slice(0,10).map(s=>`<div class="kabf-sale"><span>${Number.isFinite(s._armor)?'ARM '+s._armor:'DMG '+(s._damage??'?')} · Bonus ${s._bonuses?.map(b=>`${b.value}%`).join(' + ')||'?'} · Quality ${s._quality??'?'}%</span><b>${money(s._price)}</b></div>`).join('');}
