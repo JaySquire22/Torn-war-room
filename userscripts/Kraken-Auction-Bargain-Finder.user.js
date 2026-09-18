@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Auction Bargain Finder
 // @namespace    https://github.com/JaySquire22
-// @version      0.6.1
+// @version      0.7.0
 // @description  Adds ranked-weapon bargain assessment, filters and sorting to Torn's Auction House in Torn PDA.
 // @author       Jay / Kraken
 // @match        https://www.torn.com/amarket.php*
@@ -34,6 +34,7 @@
       #kabf .body{padding:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px} #kabf label{color:#aab4c5;font-size:11px}
       #kabf select,#kabf input,#kabf button{width:100%;min-height:40px;margin-top:3px;border:1px solid #344158;border-radius:8px;background:#202a3b;color:#fff;padding:7px;font:inherit}
       #kabf button{background:#a72f43;font-weight:800} #kabf .wide{grid-column:1/-1} #kabf-status{color:#aab4c5;padding:0 10px 10px}
+      #kabf .multi{position:relative;margin-top:3px}#kabf .multi>summary{min-height:40px;padding:10px;border:1px solid #344158;border-radius:8px;background:#202a3b;color:#fff;font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#kabf .multi-options{max-height:240px;overflow:auto;padding:6px;background:#171f2e;border:1px solid #344158;border-radius:8px;margin-top:4px}#kabf .multi-options label{display:flex;align-items:center;gap:8px;padding:7px;color:#fff;font-size:12px}#kabf .multi-options input{width:20px;min-height:20px;margin:0;accent-color:#c43a50}
       li[data-kabf]{position:relative} .kabf-badge{margin:7px 8px;padding:7px 9px;border-radius:8px;background:#1c2636;border-left:4px solid #718096;font:12px/1.35 Arial,sans-serif;color:#eaf0f8}
       .kabf-good{border-left-color:#3bc98b;color:#86efc0}.kabf-bad{border-left-color:#e55262;color:#ff9ba6}.kabf-wait{border-left-color:#e7b24a;color:#f4d284}
       li.kabf-hidden{display:none!important} li.kabf-best{box-shadow:inset 4px 0 #3bc98b}
@@ -48,20 +49,24 @@
     if ($('kabf')) return;
     const box=document.createElement('details'); box.id='kabf'; box.open=true;
     box.innerHTML=`<summary>🐙 Kraken Auction Bargain Finder</summary><div class="body">
-      <label>Weapon<select id="kabf-weapon"><option value="">All weapons</option></select></label>
-      <label>Bonus<select id="kabf-bonus"><option value="">All bonuses</option>${Object.keys(BONUS_IDS).sort().map(x=>`<option>${x}</option>`).join('')}</select></label>
+      <label>Weapons<details class="multi" id="kabf-weapon-picker"><summary id="kabf-weapon-summary">All weapons</summary><div class="multi-options" id="kabf-weapon-options"></div></details></label>
+      <label>Bonuses<details class="multi" id="kabf-bonus-picker"><summary id="kabf-bonus-summary">All bonuses</summary><div class="multi-options" id="kabf-bonus-options">${Object.keys(BONUS_IDS).sort().map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}">${escapeHtml(x)}</label>`).join('')}</div></details></label>
       <button class="wide" id="kabf-assess">Search every auction page</button>
       <button class="wide" id="kabf-show">Show matching auctions</button>
       <button class="wide" id="kabf-stop" style="display:none;background:#4a5568">Stop after this page</button>
     </div><div id="kabf-status">Waiting for weapon auctions…</div>`;
     const list=panel.querySelector('div.items-list-wrap'); panel.insertBefore(box,list||panel.firstChild);
-    ['kabf-weapon','kabf-bonus'].forEach(id=>$(id).addEventListener('change',async()=>{renderResults();if(!state.busy){await loadMatchingHistories();renderResults();}}));
+    ['kabf-weapon-options','kabf-bonus-options'].forEach(id=>$(id).addEventListener('change',async()=>{updatePickerSummaries();renderResults();if(!state.busy){await loadMatchingHistories();renderResults();}}));
     $('kabf-assess').addEventListener('click', assessVisible);
     $('kabf-show').addEventListener('click',async()=>{if(!state.busy)await loadMatchingHistories();renderResults();$('kabf-results').classList.add('open');});
     $('kabf-stop').addEventListener('click',()=>{state.stopRequested=true;$('kabf-status').textContent='Stopping after the current page…';});
     if(!$('kabf-results')){const results=document.createElement('section');results.id='kabf-results';results.innerHTML='<div class="head"><span>🐙 Matching Auction Weapons</span><button id="kabf-close">Close</button></div><div id="kabf-results-list"></div>';document.body.appendChild(results);$('kabf-close').addEventListener('click',()=>results.classList.remove('open'));$('kabf-results-list').addEventListener('click',async e=>{const open=e.target.closest('[data-kabf-open]'),historyButton=e.target.closest('[data-kabf-history]');if(open){e.preventDefault();await openAuctionCard(open.dataset.kabfOpen);}if(historyButton){e.preventDefault();const r=state.rows.get(historyButton.dataset.kabfHistory);if(r){historyButton.disabled=true;historyButton.textContent='Loading history…';await assessOne(r,true);renderResults();}}});}
     loadWeaponCatalogue();
   }
+
+  function selectedValues(id){return [...($(id)?.querySelectorAll('input:checked')||[])].map(x=>x.value);}
+  function pickerText(values,empty){return values.length?values.join(', '):empty;}
+  function updatePickerSummaries(){$('kabf-weapon-summary').textContent=pickerText(selectedValues('kabf-weapon-options'),'All weapons');$('kabf-bonus-summary').textContent=pickerText(selectedValues('kabf-bonus-options'),'All bonuses');}
 
   function endTimeToEpoch(title){const m=String(title||'').match(/(\d{2}):(\d{2}):(\d{2})\s*-\s*(\d{2})\/(\d{2})\/(\d{2})/);if(!m)return null;return Math.floor(Date.UTC(2000+Number(m[6]),Number(m[5])-1,Number(m[4]),Number(m[1]),Number(m[2]),Number(m[3]))/1000);}
   function remaining(r){return r.endEpoch===null?null:r.endEpoch-Math.floor(Date.now()/1000);}
@@ -106,7 +111,7 @@
     refreshWeaponOptions();
   }
 
-  function refreshWeaponOptions(){const select=$('kabf-weapon');if(!select)return;const selected=select.value,names=[...new Set([...state.weaponCatalogue,...state.rows.values()].map(r=>typeof r==='string'?r:r.name).filter(Boolean))];if(selected&&!names.includes(selected))names.push(selected);names.sort((a,b)=>a.localeCompare(b));select.innerHTML='<option value="">All weapons</option>'+names.map(x=>`<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');if(selected)select.value=selected;}
+  function refreshWeaponOptions(){const box=$('kabf-weapon-options');if(!box)return;const selected=new Set(selectedValues('kabf-weapon-options')),names=[...new Set([...state.weaponCatalogue,...state.rows.values()].map(r=>typeof r==='string'?r:r.name).filter(Boolean))];selected.forEach(x=>{if(!names.includes(x))names.push(x);});names.sort((a,b)=>a.localeCompare(b));box.innerHTML=names.map(x=>`<label><input type="checkbox" value="${escapeHtml(x)}" ${selected.has(x)?'checked':''}>${escapeHtml(x)}</label>`).join('');updatePickerSummaries();}
   async function loadWeaponCatalogue(){if(state.catalogueLoading||state.weaponCatalogue.length)return;state.catalogueLoading=true;try{const payloads=await Promise.all(['Primary','Secondary','Melee'].map(cat=>pdaGet(`https://api.torn.com/v2/torn/items?cat=${encodeURIComponent(cat)}&key=${encodeURIComponent(API_KEY)}&comment=KrakenAuctionFinder`)));state.weaponCatalogue=[...new Set(payloads.flatMap(p=>(p.items||[]).map(x=>x.name).filter(Boolean)))];refreshWeaponOptions();}catch(_){refreshWeaponOptions();}finally{state.catalogueLoading=false;}}
 
   function requestBody(r,exact=true) {
@@ -231,7 +236,7 @@
     finally{state.busy=false;state.scanningAll=false;$('kabf-assess').disabled=false;$('kabf-stop').style.display='none';renderResults();$('kabf-results')?.classList.add('open');}
   }
 
-  function matchesSearch(r){const weapon=$('kabf-weapon')?.value||'',bonus=$('kabf-bonus')?.value||'';return (!weapon||r.name===weapon)&&(!bonus||(r.bonuses||[]).some(b=>(b.title||b.name)===bonus));}
+  function matchesSearch(r){const weapons=selectedValues('kabf-weapon-options'),bonuses=selectedValues('kabf-bonus-options'),itemBonuses=(r.bonuses||[]).map(b=>b.title||b.name);return (!weapons.length||weapons.includes(r.name))&&(!bonuses.length||bonuses.some(x=>itemBonuses.includes(x)));}
   function matchingRows(){return [...state.rows.values()].filter(matchesSearch).sort((a,b)=>(remaining(a)??Infinity)-(remaining(b)??Infinity));}
   function renderResults(){const list=$('kabf-results-list');if(!list)return;const openUids=new Set([...list.querySelectorAll('details[open]')].map(d=>d.closest('[data-result-uid]')?.dataset.resultUid).filter(Boolean)),rows=matchingRows();list.innerHTML=rows.length?rows.map(r=>{const rem=remaining(r),x=r.result,diff=x?.diff,endingSoon=rem!==null&&rem<=3600&&rem>0,deal=diff==null?(endingSoon?'Bargain check pending':'Load history for comparison'):`${Math.abs(diff).toFixed(1)}% ${diff<0?'below':'above'} historical median`;return `<article class="kabf-result ${diff<0?'good':''}" data-result-uid="${escapeHtml(r.uid)}"><a href="#" class="title" data-kabf-open="${escapeHtml(r.uid)}">${escapeHtml(r.name||'Loading weapon…')}</a><div class="meta">${escapeHtml((r.bonuses||[]).map(b=>(b.title||b.name)+(b.value!=null?' '+b.value+'%':'')).join(', ')||'Loading bonuses…')} · Page ${r.page}<br>${remainingText(rem)} · Current bid ${money(r.price)}</div><div class="${diff==null?'waiting':'deal'}">${x&&!x.exact?'<b style="color:#ff6b78">No exact comparisons</b><br>':''}${deal}${x?`<br>Median ${money(x.median)} · low ${money(x.low)} · high ${money(x.high)} · ${x.count} ${x.exact?'exact':'closest'} comparisons`:''}</div>${x?`<details ${openUids.has(r.uid)?'open':''}><summary>Comparable auction sales</summary><div class="kabf-sales">${salesHtml(x)||'No comparable sales found.'}</div></details>`:`<button class="kabf-history" data-kabf-history="${escapeHtml(r.uid)}">Load auction history</button>`}<button class="kabf-open" data-kabf-open="${escapeHtml(r.uid)}">Open auction card</button></article>`;}).join(''):'<div class="kabf-result">No indexed auctions match those weapon and bonus choices.</div>';}
 
