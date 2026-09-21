@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.5.0
+// @version      0.5.1
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.5.0";
+    const VERSION = "0.5.1";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -460,7 +460,7 @@
 
     function itemSummary(item) {
         const details = [];
-        const armourSlot = [4, 6, 7, 8, 9].includes(Number(item.equip_slot));
+        const armourSlot = isArmourSlot(item);
         if (armourSlot) {
             if (item.armour !== null && item.armour !== undefined) details.push(`ARM ${item.armour}`);
         } else {
@@ -473,6 +473,10 @@
             details.push(bonus.value === null ? bonus.name : `${bonus.name} ${bonus.value}%`);
         }
         return details.join(" · ");
+    }
+
+    function isArmourSlot(item) {
+        return [4, 6, 7, 8, 9].includes(Number(item?.equip_slot));
     }
 
     function renderPanel() {
@@ -555,7 +559,9 @@
             const name = W.document.createElement("strong");
             name.textContent = item.name;
             const details = W.document.createElement("small");
-            details.textContent = itemSummary(item) || "No additional details supplied";
+            details.textContent = itemSummary(item) || (isArmourSlot(item)
+                ? "Rating, quality and bonuses not exposed by Torn"
+                : "No additional details supplied");
             content.append(name, details);
             row.append(imageWrap, slot, content);
             list.appendChild(row);
@@ -755,7 +761,54 @@
         const actions = profileActionsPanel();
         if (!actions?.parentElement) return false;
         if (actions.nextElementSibling !== panel) actions.after(panel);
+        wireProfileAttackControls(actions);
         return true;
+    }
+
+    function profileAttackUrl() {
+        return `/page.php?sid=attack&user2ID=${currentTargetId()}`;
+    }
+
+    function isProfileAttackControl(element) {
+        if (!element || typeof element.closest !== "function") return false;
+        const control = element.closest("a,button,[role='button']");
+        if (!control) return false;
+        const labelledChild = control.querySelector("[title],[aria-label],img[alt]");
+        const signature = [
+            control.getAttribute("href"),
+            control.id,
+            control.className,
+            control.getAttribute("title"),
+            control.getAttribute("aria-label"),
+            control.getAttribute("data-action"),
+            control.textContent,
+            labelledChild?.getAttribute("title"),
+            labelledChild?.getAttribute("aria-label"),
+            labelledChild?.getAttribute("alt")
+        ].filter(Boolean).join(" ").toLowerCase();
+        return signature.includes("attack") || signature.includes("sid=attack");
+    }
+
+    function wireProfileAttackControls(actions = profileActionsPanel()) {
+        if (!actions) return;
+        for (const control of actions.querySelectorAll("a,button,[role='button']")) {
+            if (!isProfileAttackControl(control)) continue;
+            if (control.tagName === "A") control.href = profileAttackUrl();
+            control.removeAttribute("disabled");
+            control.removeAttribute("aria-disabled");
+            control.classList.remove("disabled", "is-disabled");
+        }
+    }
+
+    function installProfileAttackNavigation() {
+        W.document.addEventListener("click", (event) => {
+            const actions = profileActionsPanel();
+            const target = event.target && typeof event.target.closest === "function" ? event.target : null;
+            if (!actions || !target || !actions.contains(target) || !isProfileAttackControl(target)) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            W.location.assign(profileAttackUrl());
+        }, true);
     }
 
     function maintainProfilePanelPlacement(panel) {
@@ -821,6 +874,7 @@
     if (!currentTargetId() || W.__krakenIntelInstalled) return;
     W.__krakenIntelInstalled = true;
     if (pageDetails().type === "attack") installFetchObserver();
+    if (pageDetails().type === "profile") installProfileAttackNavigation();
     installStyles();
     W.document.addEventListener("visibilitychange", () => {
         if (W.document.visibilityState === "visible" && sharingEnabled()) syncSharedIntel({ quiet: true });
