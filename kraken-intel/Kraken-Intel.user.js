@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.6.5
+// @version      0.6.6
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,13 +21,13 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.6.5";
+    const VERSION = "0.6.6";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
     const CONSENT_KEY = "kraken_intel_sharing_consent_v1";
     const AUTH_STORAGE_KEY = "kraken_intel_supabase_session_v1";
-    const POSITION_STORAGE_KEY = "kraken_intel_weapon_positions_v1";
+    const POSITION_STORAGE_KEY = "kraken_intel_weapon_positions_v2";
     const MAX_LOCAL_CAPTURES = 200;
     const SYNC_INTERVAL_MS = 60e3;
     const COMBAT_SLOTS = new Map([
@@ -717,10 +717,10 @@
     }
 
     const DEFAULT_WEAPON_POSITIONS = {
-        1: { x: 34, y: 38 },
-        2: { x: 66, y: 38 },
-        3: { x: 34, y: 62 },
-        5: { x: 66, y: 62 }
+        1: { x: 20, y: 12.5 },
+        2: { x: 75, y: 12.5 },
+        3: { x: 76, y: 90 },
+        5: { x: 76, y: 90 }
     };
 
     function storedWeaponPositions() {
