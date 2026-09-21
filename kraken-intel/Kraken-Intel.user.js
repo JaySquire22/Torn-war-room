@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.2.0
+// @version      0.3.0
 // @author       -TheKraken-
-// @description  Locally captures and displays equipment Torn reveals on a manually opened attack page.
+// @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
 // @updateURL    https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
 // @match        https://www.torn.com/page.php*
 // @match        https://www.torn.com/profiles.php*
+// @connect      igiyqcgpwonbbjdnvxwd.supabase.co
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @run-at       document-start
 // ==/UserScript==
@@ -19,10 +21,15 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.2.0";
+    const VERSION = "0.3.0";
+    const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
+    const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
     const PANEL_COLLAPSED_KEY = "kraken_intel_panel_collapsed";
-    const MAX_LOCAL_CAPTURES = 50;
+    const CONSENT_KEY = "kraken_intel_sharing_consent_v1";
+    const AUTH_STORAGE_KEY = "kraken_intel_supabase_session_v1";
+    const MAX_LOCAL_CAPTURES = 200;
+    const SYNC_INTERVAL_MS = 60e3;
     const COMBAT_SLOTS = new Map([
         [1, "Primary"],
         [2, "Secondary"],
@@ -39,7 +46,9 @@
         panel: null,
         body: null,
         status: "Waiting for Torn attack data…",
-        latest: null
+        latest: null,
+        syncTimer: null,
+        syncing: false
     };
 
     function readValue(key, fallback) {
@@ -56,6 +65,110 @@
         } catch (error) {
             console.warn(`[${SCRIPT}] Could not save local data`, error);
         }
+    }
+
+    function sharingEnabled() {
+        return readValue(CONSENT_KEY, false) === true;
+    }
+
+    function parseJson(text) {
+        try {
+            return JSON.parse(text || "null");
+        } catch {
+            return null;
+        }
+    }
+
+    function httpRequest(method, path, { body = null, accessToken = null } = {}) {
+        const url = `${SUPABASE_URL}${path}`;
+        const headers = {
+            apikey: SUPABASE_KEY,
+            Accept: "application/json"
+        };
+        if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+        if (body !== null) headers["Content-Type"] = "application/json";
+        const encoded = body === null ? null : JSON.stringify(body);
+        const wrap = (status, text) => ({
+            ok: status >= 200 && status < 300,
+            status,
+            data: parseJson(text)
+        });
+
+        if (typeof W.PDA_httpGet === "function") {
+            return (async () => {
+                let result;
+                if (method === "POST" && typeof W.PDA_httpPost === "function") {
+                    result = await W.PDA_httpPost(url, headers, encoded || "");
+                } else {
+                    result = await W.PDA_httpGet(url, headers);
+                }
+                return wrap(Number(result?.status || 0), String(result?.responseText || ""));
+            })().catch(() => wrap(0, ""));
+        }
+
+        if (typeof GM_xmlhttpRequest === "function") {
+            return new Promise((resolve) => {
+                GM_xmlhttpRequest({
+                    method,
+                    url,
+                    headers,
+                    ...(encoded === null ? {} : { data: encoded }),
+                    timeout: 12e3,
+                    onload: (result) => resolve(wrap(result.status, result.responseText)),
+                    onerror: () => resolve(wrap(0, "")),
+                    ontimeout: () => resolve(wrap(0, ""))
+                });
+            });
+        }
+
+        return W.fetch(url, {
+            method,
+            headers,
+            ...(encoded === null ? {} : { body: encoded })
+        }).then(async (response) => wrap(response.status, await response.text()))
+            .catch(() => wrap(0, ""));
+    }
+
+    function normalizedSession(raw) {
+        if (objectRecord(raw?.session)) raw = raw.session;
+        if (!objectRecord(raw) || typeof raw.access_token !== "string" || typeof raw.refresh_token !== "string") return null;
+        const reportedExpiry = Number(raw.expires_at);
+        const expiresAt = reportedExpiry
+            ? (reportedExpiry < 1e12 ? reportedExpiry * 1e3 : reportedExpiry)
+            : Date.now() + Number(raw.expires_in || 3600) * 1e3;
+        return {
+            access_token: raw.access_token,
+            refresh_token: raw.refresh_token,
+            expires_at: expiresAt
+        };
+    }
+
+    async function authenticatedSession() {
+        let session = normalizedSession(readValue(AUTH_STORAGE_KEY, null));
+        if (session && session.expires_at > Date.now() + 60e3) return session;
+
+        if (session?.refresh_token) {
+            const refreshed = await httpRequest("POST", "/auth/v1/token?grant_type=refresh_token", {
+                body: { refresh_token: session.refresh_token }
+            });
+            const next = refreshed.ok ? normalizedSession(refreshed.data) : null;
+            if (next) {
+                writeValue(AUTH_STORAGE_KEY, next);
+                return next;
+            }
+        }
+
+        const created = await httpRequest("POST", "/auth/v1/signup", { body: { data: {} } });
+        const next = created.ok ? normalizedSession(created.data) : null;
+        if (!next) throw new Error(created.data?.msg || created.data?.message || "Anonymous connection failed");
+        writeValue(AUTH_STORAGE_KEY, next);
+        return next;
+    }
+
+    async function sha256(value) {
+        const bytes = new TextEncoder().encode(value);
+        const digest = await W.crypto.subtle.digest("SHA-256", bytes);
+        return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     }
 
     function positiveInteger(value) {
@@ -216,12 +329,106 @@
             .sort((a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at))[0] || null;
     }
 
+    function observationConfidence(observedAt) {
+        const ageHours = (Date.now() - Date.parse(observedAt)) / 36e5;
+        if (!Number.isFinite(ageHours) || ageHours < 0) return { key: "unknown", label: "Unknown age" };
+        if (ageHours < 1) return { key: "high", label: "High confidence" };
+        if (ageHours < 12) return { key: "medium", label: "Medium confidence" };
+        if (ageHours < 72) return { key: "low", label: "Low confidence" };
+        return { key: "stale", label: "Stale intel" };
+    }
+
+    function sharedRowToCapture(row) {
+        if (!objectRecord(row) || !positiveInteger(row.target_id) || !Array.isArray(row.items)) return null;
+        return {
+            schema_version: positiveInteger(row.schema_version) || 1,
+            target_id: Number(row.target_id),
+            target_name: typeof row.target_name === "string" ? row.target_name : null,
+            observed_at: row.observed_at,
+            fight_id: positiveInteger(row.fight_id),
+            attack_status: typeof row.attack_status === "string" ? row.attack_status : null,
+            items: row.items,
+            source: "shared"
+        };
+    }
+
+    async function fetchSharedCapture(targetId) {
+        if (!sharingEnabled() || !targetId) return null;
+        const session = await authenticatedSession();
+        const query = new URLSearchParams({
+            target_id: `eq.${targetId}`,
+            select: "target_id,target_name,observed_at,fight_id,attack_status,items,schema_version",
+            limit: "1"
+        });
+        const response = await httpRequest("GET", `/rest/v1/ki_public_loadouts?${query}`, {
+            accessToken: session.access_token
+        });
+        if (!response.ok) throw new Error(response.data?.message || `Shared lookup failed (${response.status})`);
+        return sharedRowToCapture(Array.isArray(response.data) ? response.data[0] : null);
+    }
+
+    async function uploadSharedCapture(capture) {
+        if (!sharingEnabled()) return false;
+        const session = await authenticatedSession();
+        const fingerprint = await sha256(JSON.stringify(capture.items));
+        const response = await httpRequest("POST", "/rest/v1/rpc/ki_submit_public_loadout", {
+            accessToken: session.access_token,
+            body: {
+                p_target_id: capture.target_id,
+                p_target_name: capture.target_name,
+                p_observed_at: capture.observed_at,
+                p_fingerprint: fingerprint,
+                p_fight_id: capture.fight_id,
+                p_attack_status: capture.attack_status,
+                p_items: capture.items,
+                p_schema_version: capture.schema_version
+            }
+        });
+        if (!response.ok) throw new Error(response.data?.message || `Shared upload failed (${response.status})`);
+        return true;
+    }
+
+    async function syncSharedIntel({ quiet = false } = {}) {
+        if (!sharingEnabled() || state.syncing || !currentTargetId() || W.document.visibilityState !== "visible") return;
+        state.syncing = true;
+        try {
+            const shared = await fetchSharedCapture(currentTargetId());
+            if (shared && (!state.latest || Date.parse(shared.observed_at) > Date.parse(state.latest.observed_at))) {
+                state.latest = shared;
+                saveCapture(shared);
+            }
+            if (!quiet) {
+                state.status = shared
+                    ? "Showing the newest shared Kraken Intel observation."
+                    : "No shared loadout has been observed for this player yet.";
+                renderPanel();
+            } else if (shared) {
+                renderPanel();
+            }
+        } catch (error) {
+            if (!quiet) {
+                state.status = `Shared connection unavailable: ${error.message}`;
+                renderPanel();
+            }
+            console.warn(`[${SCRIPT}] Shared sync failed`, error);
+        } finally {
+            state.syncing = false;
+        }
+    }
+
+    function startSharedSync() {
+        if (state.syncTimer !== null) W.clearInterval(state.syncTimer);
+        if (!sharingEnabled()) return;
+        state.syncTimer = W.setInterval(() => syncSharedIntel({ quiet: true }), SYNC_INTERVAL_MS);
+        syncSharedIntel();
+    }
+
     function itemSummary(item) {
         const details = [];
         if (item.damage !== null) details.push(`DMG ${item.damage}`);
         if (item.accuracy !== null) details.push(`ACC ${item.accuracy}`);
         if (item.armour !== null) details.push(`ARM ${item.armour}`);
-        for (const bonus of item.bonuses) {
+        for (const bonus of Array.isArray(item.bonuses) ? item.bonuses : []) {
             details.push(bonus.value === null ? bonus.name : `${bonus.name} ${bonus.value}%`);
         }
         return details.join(" · ");
@@ -231,6 +438,25 @@
         if (!state.body) return;
         state.body.replaceChildren();
 
+        if (!sharingEnabled()) {
+            const consent = W.document.createElement("div");
+            consent.className = "ki-consent";
+            const copy = W.document.createElement("p");
+            copy.textContent = "Kraken Intel collaboratively shares equipment Torn reveals on attack pages you actively view, together with the target ID and observation time. It does not automate attacks or store a Torn API key.";
+            const enable = W.document.createElement("button");
+            enable.type = "button";
+            enable.className = "ki-enable";
+            enable.textContent = "Enable shared intel";
+            enable.addEventListener("click", () => {
+                writeValue(CONSENT_KEY, true);
+                state.status = "Connecting to the shared Kraken Intel network…";
+                renderPanel();
+                startSharedSync();
+            });
+            consent.append(copy, enable);
+            state.body.appendChild(consent);
+        }
+
         const status = W.document.createElement("div");
         status.className = "ki-status";
         status.textContent = state.status;
@@ -239,10 +465,16 @@
         if (!state.latest) return;
         const meta = W.document.createElement("div");
         meta.className = "ki-meta";
+        const confidence = observationConfidence(state.latest.observed_at);
         const target = state.latest.target_name
             ? `${state.latest.target_name} [${state.latest.target_id}]`
             : `Player ${state.latest.target_id}`;
-        meta.textContent = `${target} · ${new Date(state.latest.observed_at).toLocaleString()}`;
+        const identity = W.document.createElement("span");
+        identity.textContent = `${target} · ${new Date(state.latest.observed_at).toLocaleString()}`;
+        const badge = W.document.createElement("span");
+        badge.className = `ki-confidence is-${confidence.key}`;
+        badge.textContent = confidence.label;
+        meta.append(identity, badge);
         state.body.appendChild(meta);
 
         const list = W.document.createElement("div");
@@ -284,11 +516,13 @@
 
         const note = W.document.createElement("div");
         note.className = "ki-note";
-        note.textContent = "Saved locally on this device only — nothing has been uploaded or shared.";
+        note.textContent = sharingEnabled()
+            ? "Shared automatically with the Kraken Intel contributor network. Newer observations take priority."
+            : "Saved locally on this device; shared uploads are currently disabled.";
         state.body.appendChild(note);
     }
 
-    function receiveAttackData(data) {
+    async function receiveAttackData(data) {
         const capture = buildCapture(data);
         if (!capture) {
             if (currentTargetId() && visibleAndFocused()) {
@@ -299,10 +533,21 @@
         }
         saveCapture(capture);
         state.latest = capture;
-        state.status = "Loadout detected and saved locally.";
+        state.status = sharingEnabled()
+            ? "Loadout detected; sharing with the Kraken Intel network…"
+            : "Loadout detected and saved locally. Enable sharing to contribute it.";
         renderPanel();
         W.document.dispatchEvent(new CustomEvent("kraken-intel:capture", { detail: capture }));
         console.info(`[${SCRIPT}] Captured loadout for ${capture.target_id}`, capture);
+        if (!sharingEnabled()) return;
+        try {
+            await uploadSharedCapture(capture);
+            state.status = "Fresh loadout captured and shared successfully.";
+        } catch (error) {
+            state.status = `Saved locally, but sharing failed: ${error.message}`;
+            console.warn(`[${SCRIPT}] Shared upload failed`, error);
+        }
+        renderPanel();
     }
 
     function inspectResponse(response) {
@@ -315,7 +560,9 @@
         }
         clone.json()
             .then((data) => {
-                if (objectRecord(data)) receiveAttackData(data);
+                if (objectRecord(data)) receiveAttackData(data).catch((error) => {
+                    console.warn(`[${SCRIPT}] Could not process attack response`, error);
+                });
             })
             .catch((error) => console.warn(`[${SCRIPT}] Could not read attack response`, error));
     }
@@ -347,7 +594,12 @@
             #kraken-intel-panel.is-collapsed .ki-body{display:none}
             #kraken-intel-panel .ki-status,#kraken-intel-panel .ki-meta,#kraken-intel-panel .ki-note{padding:8px 10px}
             #kraken-intel-panel .ki-status{color:#7ee5ee}
-            #kraken-intel-panel .ki-meta{border-top:1px solid #ffffff17;color:#aab8bc;font-size:10px}
+            #kraken-intel-panel .ki-meta{border-top:1px solid #ffffff17;color:#aab8bc;font-size:10px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px}
+            #kraken-intel-panel .ki-confidence{border-radius:10px;padding:2px 7px;font-size:9px;font-weight:700;color:#10171b}
+            #kraken-intel-panel .ki-confidence.is-high{background:#63d786}
+            #kraken-intel-panel .ki-confidence.is-medium{background:#f0c45a}
+            #kraken-intel-panel .ki-confidence.is-low{background:#ec726e}
+            #kraken-intel-panel .ki-confidence.is-stale,#kraken-intel-panel .ki-confidence.is-unknown{background:#879397}
             #kraken-intel-panel .ki-row{display:grid;grid-template-columns:52px 72px minmax(0,1fr);align-items:center;gap:7px;padding:7px 10px;border-top:1px solid #ffffff12}
             #kraken-intel-panel .ki-image-wrap{display:flex;width:50px;height:34px;align-items:center;justify-content:center;border-radius:5px;background:#ffffff0b;overflow:hidden}
             #kraken-intel-panel .ki-image-wrap.is-missing:after{content:"?";color:#60757a;font-weight:700}
@@ -358,6 +610,9 @@
             #kraken-intel-panel .ki-item strong{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             #kraken-intel-panel .ki-item small{color:#aab8bc;white-space:normal}
             #kraken-intel-panel .ki-note{border-top:1px solid #ffffff17;color:#7f9297;font-size:10px}
+            #kraken-intel-panel .ki-consent{padding:10px;border-bottom:1px solid #ffffff17;background:#123037}
+            #kraken-intel-panel .ki-consent p{margin:0 0 9px;color:#cfdee0;font-size:10px;line-height:1.4}
+            #kraken-intel-panel .ki-enable{border:1px solid #49c5d0;background:#177d86;color:#fff;border-radius:5px;padding:6px 9px;font:700 11px Arial,sans-serif;cursor:pointer}
         `;
         (W.document.head || W.document.documentElement).appendChild(style);
     }
@@ -376,7 +631,7 @@
         title.textContent = "🐙 Kraken Intel";
         const version = W.document.createElement("span");
         version.className = "ki-version";
-        version.textContent = `Local intel v${VERSION}`;
+        version.textContent = `Shared intel v${VERSION}`;
         head.append(title, version);
         head.addEventListener("click", () => {
             const next = !panel.classList.contains("is-collapsed");
@@ -399,19 +654,23 @@
         if (saved) {
             state.latest = saved;
             state.status = page.type === "profile"
-                ? "Showing the latest loadout captured locally for this player."
-                : "Showing previously captured local intel while checking for fresh attack data.";
+                ? "Showing cached intel while checking the shared network."
+                : "Showing cached intel while checking for newer observations.";
         } else if (page.type === "profile") {
-            state.status = "No locally captured loadout for this player yet.";
+            state.status = "Checking the shared network for this player…";
         }
         mountPanel();
-        console.info(`[${SCRIPT}] Loaded local-only test v${VERSION}`);
+        startSharedSync();
+        console.info(`[${SCRIPT}] Loaded shared intel v${VERSION}`);
     }
 
     if (!currentTargetId() || W.__krakenIntelInstalled) return;
     W.__krakenIntelInstalled = true;
     if (pageDetails().type === "attack") installFetchObserver();
     installStyles();
+    W.document.addEventListener("visibilitychange", () => {
+        if (W.document.visibilityState === "visible" && sharingEnabled()) syncSharedIntel({ quiet: true });
+    });
     if (W.document.readyState === "loading") {
         W.document.addEventListener("DOMContentLoaded", onReady, { once: true });
     } else {
