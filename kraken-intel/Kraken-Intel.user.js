@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.3.0
+// @version      0.3.1
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.3.0";
+    const VERSION = "0.3.1";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -48,8 +48,24 @@
         status: "Waiting for Torn attack data…",
         latest: null,
         syncTimer: null,
-        syncing: false
+        syncing: false,
+        noDataNoticeShown: false,
+        hideTimer: null
     };
+
+    function showPanel() {
+        if (state.hideTimer !== null) W.clearTimeout(state.hideTimer);
+        state.hideTimer = null;
+        if (state.panel) state.panel.hidden = false;
+    }
+
+    function hideEmptyPanelSoon(delay = 2200) {
+        if (state.hideTimer !== null) W.clearTimeout(state.hideTimer);
+        state.hideTimer = W.setTimeout(() => {
+            state.hideTimer = null;
+            if (!state.latest && sharingEnabled() && state.panel) state.panel.hidden = true;
+        }, delay);
+    }
 
     function readValue(key, fallback) {
         try {
@@ -397,16 +413,18 @@
                 state.latest = shared;
                 saveCapture(shared);
             }
+            if (shared) {
+                showPanel();
+                state.status = "";
+            }
             if (!quiet) {
-                state.status = shared
-                    ? "Showing the newest shared Kraken Intel observation."
-                    : "No shared loadout has been observed for this player yet.";
+                if (!shared && !state.latest) state.status = "No shared loadout has been observed for this player yet.";
                 renderPanel();
             } else if (shared) {
                 renderPanel();
             }
         } catch (error) {
-            if (!quiet) {
+            if (!quiet && !state.latest) {
                 state.status = `Shared connection unavailable: ${error.message}`;
                 renderPanel();
             }
@@ -457,10 +475,12 @@
             state.body.appendChild(consent);
         }
 
-        const status = W.document.createElement("div");
-        status.className = "ki-status";
-        status.textContent = state.status;
-        state.body.appendChild(status);
+        if (state.status) {
+            const status = W.document.createElement("div");
+            status.className = "ki-status";
+            status.textContent = state.status;
+            state.body.appendChild(status);
+        }
 
         if (!state.latest) return;
         const meta = W.document.createElement("div");
@@ -525,29 +545,28 @@
     async function receiveAttackData(data) {
         const capture = buildCapture(data);
         if (!capture) {
-            if (currentTargetId() && visibleAndFocused()) {
+            if (!state.latest && !state.noDataNoticeShown && currentTargetId() && visibleAndFocused()) {
+                state.noDataNoticeShown = true;
                 state.status = "Attack data received, but Torn has not revealed a usable loadout.";
+                showPanel();
                 renderPanel();
+                hideEmptyPanelSoon();
             }
             return;
         }
+        showPanel();
         saveCapture(capture);
         state.latest = capture;
-        state.status = sharingEnabled()
-            ? "Loadout detected; sharing with the Kraken Intel network…"
-            : "Loadout detected and saved locally. Enable sharing to contribute it.";
+        state.status = "";
         renderPanel();
         W.document.dispatchEvent(new CustomEvent("kraken-intel:capture", { detail: capture }));
         console.info(`[${SCRIPT}] Captured loadout for ${capture.target_id}`, capture);
         if (!sharingEnabled()) return;
         try {
             await uploadSharedCapture(capture);
-            state.status = "Fresh loadout captured and shared successfully.";
         } catch (error) {
-            state.status = `Saved locally, but sharing failed: ${error.message}`;
             console.warn(`[${SCRIPT}] Shared upload failed`, error);
         }
-        renderPanel();
     }
 
     function inspectResponse(response) {
@@ -607,6 +626,7 @@
             #kraken-intel-panel .ki-image{display:block;max-width:50px;max-height:34px;object-fit:contain}
             #kraken-intel-panel .ki-slot{color:#67cbd4;font-weight:700}
             #kraken-intel-panel .ki-item{display:flex;min-width:0;flex-direction:column}
+            #kraken-intel-panel[hidden]{display:none!important}
             #kraken-intel-panel .ki-item strong{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             #kraken-intel-panel .ki-item small{color:#aab8bc;white-space:normal}
             #kraken-intel-panel .ki-note{border-top:1px solid #ffffff17;color:#7f9297;font-size:10px}
@@ -653,9 +673,7 @@
         const saved = latestStoredCapture(page.targetId);
         if (saved) {
             state.latest = saved;
-            state.status = page.type === "profile"
-                ? "Showing cached intel while checking the shared network."
-                : "Showing cached intel while checking for newer observations.";
+            state.status = "";
         } else if (page.type === "profile") {
             state.status = "Checking the shared network for this player…";
         }
