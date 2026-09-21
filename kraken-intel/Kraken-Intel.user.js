@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.4.0
+// @version      0.4.1
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,11 +21,10 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.4.0";
+    const VERSION = "0.4.1";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
-    const PANEL_COLLAPSED_KEY = "kraken_intel_panel_collapsed";
     const CONSENT_KEY = "kraken_intel_sharing_consent_v1";
     const AUTH_STORAGE_KEY = "kraken_intel_supabase_session_v1";
     const MAX_LOCAL_CAPTURES = 200;
@@ -241,6 +240,16 @@
         }).slice(0, 2);
     }
 
+    function finiteItemNumber(...values) {
+        for (const value of values) {
+            if (value === null || value === undefined || value === "") continue;
+            const match = typeof value === "string" ? value.trim().match(/^-?\d+(?:\.\d+)?/) : null;
+            const number = match ? Number(match[0]) : Number(value);
+            if (Number.isFinite(number)) return number;
+        }
+        return null;
+    }
+
     function normalizeItem(item) {
         const equipSlot = Number(item.equipSlot);
         if (!COMBAT_SLOTS.has(equipSlot) && Number(item.ID) !== 999) return null;
@@ -251,9 +260,13 @@
             slot_name: Number(item.ID) === 999 ? "Unarmed" : COMBAT_SLOTS.get(equipSlot),
             name: String(item.name || `Item #${item.ID || "unknown"}`).slice(0, 100),
             image_url: itemImageUrl(item),
-            damage: Number.isFinite(Number(item.dmg ?? item.damage)) ? Number(item.dmg ?? item.damage) : null,
-            accuracy: Number.isFinite(Number(item.acc ?? item.accuracy)) ? Number(item.acc ?? item.accuracy) : null,
-            armour: Number.isFinite(Number(item.armor ?? item.armour)) ? Number(item.armor ?? item.armour) : null,
+            damage: finiteItemNumber(item.dmg, item.damage),
+            accuracy: finiteItemNumber(item.acc, item.accuracy),
+            armour: finiteItemNumber(item.armor, item.armour, item.def, item.defence, item.defense, item.stats?.armor, item.stats?.defence),
+            quality: finiteItemNumber(item.quality, item.qualityPercentage, item.quality_percent, item.itemQuality, item.stats?.quality),
+            rarity: typeof item.rarity === "string" && item.rarity.trim()
+                ? item.rarity.trim().slice(0, 24)
+                : null,
             bonuses: normalizeBonuses(item)
         };
     }
@@ -302,7 +315,7 @@
         if (!meaningfulItems.length) return null;
 
         return {
-            schema_version: 1,
+            schema_version: 2,
             target_id: targetId,
             target_name: typeof db.defenderUser?.playername === "string"
                 ? db.defenderUser.playername.slice(0, 64)
@@ -447,9 +460,15 @@
 
     function itemSummary(item) {
         const details = [];
-        if (item.damage !== null) details.push(`DMG ${item.damage}`);
-        if (item.accuracy !== null) details.push(`ACC ${item.accuracy}`);
-        if (item.armour !== null) details.push(`ARM ${item.armour}`);
+        const armourSlot = [4, 6, 7, 8, 9].includes(Number(item.equip_slot));
+        if (armourSlot) {
+            if (item.armour !== null && item.armour !== undefined) details.push(`ARM ${item.armour}`);
+        } else {
+            if (item.damage !== null && item.damage !== undefined) details.push(`DMG ${item.damage}`);
+            if (item.accuracy !== null && item.accuracy !== undefined) details.push(`ACC ${item.accuracy}`);
+        }
+        if (item.quality !== null && item.quality !== undefined) details.push(`Quality ${item.quality}%`);
+        if (item.rarity) details.push(String(item.rarity));
         for (const bonus of Array.isArray(item.bonuses) ? item.bonuses : []) {
             details.push(bonus.value === null ? bonus.name : `${bonus.name} ${bonus.value}%`);
         }
@@ -679,8 +698,7 @@
         if (!currentTargetId() || !W.document.body || state.panel?.isConnected) return;
         const panel = W.document.createElement("section");
         panel.id = "kraken-intel-panel";
-        const collapsed = readValue(PANEL_COLLAPSED_KEY, false) === true;
-        panel.classList.toggle("is-collapsed", collapsed);
+        panel.classList.remove("is-collapsed");
 
         const head = W.document.createElement("button");
         head.type = "button";
@@ -694,7 +712,6 @@
         head.addEventListener("click", () => {
             const next = !panel.classList.contains("is-collapsed");
             panel.classList.toggle("is-collapsed", next);
-            writeValue(PANEL_COLLAPSED_KEY, next);
         });
 
         const body = W.document.createElement("div");
