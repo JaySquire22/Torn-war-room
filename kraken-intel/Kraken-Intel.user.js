@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.3.2
+// @version      0.4.0
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.3.2";
+    const VERSION = "0.4.0";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -50,7 +50,8 @@
         syncTimer: null,
         syncing: false,
         noDataNoticeShown: false,
-        hideTimer: null
+        hideTimer: null,
+        profilePlacementObserver: null
     };
 
     function showPanel() {
@@ -636,8 +637,42 @@
             #kraken-intel-panel .ki-consent{padding:10px;border-bottom:1px solid #ffffff17;background:#123037}
             #kraken-intel-panel .ki-consent p{margin:0 0 9px;color:#cfdee0;font-size:10px;line-height:1.4}
             #kraken-intel-panel .ki-enable{border:1px solid #49c5d0;background:#177d86;color:#fff;border-radius:5px;padding:6px 9px;font:700 11px Arial,sans-serif;cursor:pointer}
+            #kraken-intel-panel.ki-profile-inline{position:static;z-index:auto;width:100%;max-width:none;margin:10px 0 0;border-color:#177d86;box-shadow:none}
+            #kraken-intel-panel.ki-profile-inline .ki-body{max-height:none}
         `;
         (W.document.head || W.document.documentElement).appendChild(style);
+    }
+
+    function profileActionsPanel() {
+        const headings = W.document.querySelectorAll(
+            ".profile-wrapper .title-black, #profileroot [class*='title'], .user-profile [class*='title']"
+        );
+        for (const heading of headings) {
+            if (heading.textContent?.trim().toLowerCase() !== "actions") continue;
+            return heading.closest(".profile-wrapper") || heading.parentElement;
+        }
+        return null;
+    }
+
+    function placeProfilePanel(panel) {
+        const actions = profileActionsPanel();
+        if (!actions?.parentElement) return false;
+        if (actions.nextElementSibling !== panel) actions.after(panel);
+        return true;
+    }
+
+    function maintainProfilePanelPlacement(panel) {
+        placeProfilePanel(panel);
+        state.profilePlacementObserver?.disconnect();
+        state.profilePlacementObserver = new MutationObserver(() => {
+            if (!panel.isConnected) {
+                state.profilePlacementObserver?.disconnect();
+                state.profilePlacementObserver = null;
+                return;
+            }
+            placeProfilePanel(panel);
+        });
+        state.profilePlacementObserver.observe(W.document.body, { childList: true, subtree: true });
     }
 
     function mountPanel() {
@@ -665,9 +700,11 @@
         const body = W.document.createElement("div");
         body.className = "ki-body";
         panel.append(head, body);
+        if (pageDetails().type === "profile") panel.classList.add("ki-profile-inline");
         W.document.body.appendChild(panel);
         state.panel = panel;
         state.body = body;
+        if (pageDetails().type === "profile") maintainProfilePanelPlacement(panel);
         renderPanel();
     }
 
