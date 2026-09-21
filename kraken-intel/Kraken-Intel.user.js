@@ -827,10 +827,12 @@
         return label;
     }
 
-    function createCalibrationControl() {
+    function createCalibrationControl(bounds) {
         const control = W.document.createElement("button");
         control.type = "button";
         control.className = "ki-calibration-control";
+        control.style.left = `${Math.round((bounds.left + bounds.right) / 2)}px`;
+        control.style.top = `${Math.round(bounds.top + 8)}px`;
         const sync = () => {
             control.textContent = state.attackCalibration ? "Done" : "Adjust intel";
             W.document.documentElement.classList.toggle("ki-calibrating", state.attackCalibration);
@@ -862,7 +864,7 @@
             const layer = W.document.createElement("div");
             layer.className = "ki-enemy-weapons-layer";
             for (const item of weaponItems) layer.appendChild(createEnemyWeaponLabel(item, bounds));
-            layer.appendChild(createCalibrationControl());
+            layer.appendChild(createCalibrationControl(bounds));
             W.document.body.appendChild(layer);
         }
         for (const item of state.latest.items) {
@@ -1033,7 +1035,7 @@
             .ki-enemy-weapon-label strong{font-size:11px}
             .ki-enemy-weapon-label .ki-enemy-weapon-copy>span{color:#d6dde0}
             .ki-position-readout{display:none;color:#7ee5ee;white-space:nowrap;font:700 8px/1.2 Arial,sans-serif}
-            .ki-calibration-control{position:absolute;left:50%;top:8px;transform:translateX(-50%);pointer-events:auto;border:1px solid #177d86;background:#10171bea;color:#e9f3f4;border-radius:5px;padding:4px 8px;font:700 9px Arial,sans-serif;box-shadow:0 2px 6px #0008}
+            .ki-calibration-control{position:absolute;transform:translateX(-50%);pointer-events:auto;border:1px solid #177d86;background:#10171bea;color:#e9f3f4;border-radius:5px;padding:4px 8px;font:700 9px Arial,sans-serif;box-shadow:0 2px 6px #0008}
             html.ki-calibrating .ki-enemy-weapon-label{pointer-events:auto;border:1px dashed #67cbd4;background:#10171bbd;border-radius:4px}
             html.ki-calibrating .ki-position-readout{display:block}
             .ki-attack-avatar-host{position:relative!important}
