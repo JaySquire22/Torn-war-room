@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.6.3
+// @version      0.6.4
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,12 +21,13 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.6.3";
+    const VERSION = "0.6.4";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
     const CONSENT_KEY = "kraken_intel_sharing_consent_v1";
     const AUTH_STORAGE_KEY = "kraken_intel_supabase_session_v1";
+    const POSITION_STORAGE_KEY = "kraken_intel_weapon_positions_v1";
     const MAX_LOCAL_CAPTURES = 200;
     const SYNC_INTERVAL_MS = 60e3;
     const COMBAT_SLOTS = new Map([
@@ -52,7 +53,8 @@
         hideTimer: null,
         profilePlacementObserver: null,
         attackLayoutObserver: null,
-        attackRenderFrame: null
+        attackRenderFrame: null,
+        attackCalibration: false
     };
 
     function showPanel() {
@@ -714,12 +716,37 @@
         return W.document.querySelector("#attack-root [class*='fight'], #attack-root") || null;
     }
 
-    const WEAPON_CORNERS = {
-        1: { horizontal: "left", vertical: "top" },
-        2: { horizontal: "right", vertical: "top" },
-        3: { horizontal: "left", vertical: "bottom" },
-        5: { horizontal: "right", vertical: "bottom" }
+    const DEFAULT_WEAPON_POSITIONS = {
+        1: { x: 34, y: 38 },
+        2: { x: 66, y: 38 },
+        3: { x: 34, y: 62 },
+        5: { x: 66, y: 62 }
     };
+
+    function storedWeaponPositions() {
+        const stored = readValue(POSITION_STORAGE_KEY, {});
+        return objectRecord(stored) ? stored : {};
+    }
+
+    function weaponPosition(slot) {
+        const saved = storedWeaponPositions()[slot];
+        const fallback = DEFAULT_WEAPON_POSITIONS[slot] || { x: 50, y: 50 };
+        const x = Number(saved?.x);
+        const y = Number(saved?.y);
+        return {
+            x: Number.isFinite(x) ? Math.min(100, Math.max(0, x)) : fallback.x,
+            y: Number.isFinite(y) ? Math.min(100, Math.max(0, y)) : fallback.y
+        };
+    }
+
+    function saveWeaponPosition(slot, position) {
+        const positions = storedWeaponPositions();
+        positions[slot] = {
+            x: Math.round(position.x * 10) / 10,
+            y: Math.round(position.y * 10) / 10
+        };
+        writeValue(POSITION_STORAGE_KEY, positions);
+    }
 
     function attackEquipmentBounds(avatar) {
         const avatarRect = avatar.getBoundingClientRect();
@@ -736,25 +763,91 @@
         };
     }
 
-    function createEnemyWeaponLabel(item) {
+    function positionWeaponLabel(label, position, bounds) {
+        label.style.left = `${Math.round(bounds.left + (bounds.right - bounds.left) * position.x / 100)}px`;
+        label.style.top = `${Math.round(bounds.top + (bounds.bottom - bounds.top) * position.y / 100)}px`;
+        label.dataset.x = String(Math.round(position.x * 10) / 10);
+        label.dataset.y = String(Math.round(position.y * 10) / 10);
+        const readout = label.querySelector(".ki-position-readout");
+        if (readout) readout.textContent = `X ${label.dataset.x}% · Y ${label.dataset.y}%`;
+    }
+
+    function createEnemyWeaponLabel(item, bounds) {
         const label = W.document.createElement("div");
         label.className = "ki-enemy-weapon-label";
         label.dataset.slot = String(item.equip_slot);
         label.title = `${item.slot_name || "Weapon"} — ${item.name}`;
 
+        const image = W.document.createElement("img");
+        image.src = item.image_url || `https://www.torn.com/images/items/${item.item_id}/large.png`;
+        image.alt = "";
+        const copy = W.document.createElement("span");
+        copy.className = "ki-enemy-weapon-copy";
         const name = W.document.createElement("strong");
         name.textContent = item.name;
         const damage = W.document.createElement("span");
         damage.textContent = `Damage ${item.damage ?? "—"}`;
         const accuracy = W.document.createElement("span");
         accuracy.textContent = `Accuracy ${item.accuracy ?? "—"}`;
-        label.append(name, damage, accuracy);
+        const readout = W.document.createElement("em");
+        readout.className = "ki-position-readout";
+        copy.append(name, damage, accuracy, readout);
+        label.append(image, copy);
+
+        positionWeaponLabel(label, weaponPosition(item.equip_slot), bounds);
+        let dragging = false;
+        label.addEventListener("pointerdown", (event) => {
+            if (!state.attackCalibration) return;
+            dragging = true;
+            event.preventDefault();
+            event.stopPropagation();
+            label.setPointerCapture?.(event.pointerId);
+        });
+        label.addEventListener("pointermove", (event) => {
+            if (!dragging || !state.attackCalibration) return;
+            const position = {
+                x: Math.min(100, Math.max(0, (event.clientX - bounds.left) / (bounds.right - bounds.left) * 100)),
+                y: Math.min(100, Math.max(0, (event.clientY - bounds.top) / (bounds.bottom - bounds.top) * 100))
+            };
+            positionWeaponLabel(label, position, bounds);
+            event.preventDefault();
+        });
+        const finishDrag = (event) => {
+            if (!dragging) return;
+            dragging = false;
+            saveWeaponPosition(item.equip_slot, {
+                x: Number(label.dataset.x),
+                y: Number(label.dataset.y)
+            });
+            label.releasePointerCapture?.(event.pointerId);
+            event.preventDefault();
+        };
+        label.addEventListener("pointerup", finishDrag);
+        label.addEventListener("pointercancel", finishDrag);
         return label;
+    }
+
+    function createCalibrationControl() {
+        const control = W.document.createElement("button");
+        control.type = "button";
+        control.className = "ki-calibration-control";
+        const sync = () => {
+            control.textContent = state.attackCalibration ? "Done" : "Adjust intel";
+            W.document.documentElement.classList.toggle("ki-calibrating", state.attackCalibration);
+        };
+        control.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            state.attackCalibration = !state.attackCalibration;
+            sync();
+        });
+        sync();
+        return control;
     }
 
     function renderAttackEquipment() {
         state.attackRenderFrame = null;
-        W.document.querySelectorAll(".ki-enemy-weapons-layer,.ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-enemy-weapon-label,.ki-armour-stat-label").forEach((node) => node.remove());
+        W.document.querySelectorAll(".ki-enemy-weapons-layer,.ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-enemy-weapon-label,.ki-calibration-control,.ki-armour-stat-label").forEach((node) => node.remove());
         W.document.querySelectorAll(".ki-attack-weapon-host").forEach((node) => node.classList.remove("ki-attack-weapon-host"));
         W.document.querySelectorAll(".ki-attack-avatar-host").forEach((node) => node.classList.remove("ki-attack-avatar-host"));
         W.document.documentElement.classList.toggle("ki-loadout-revealed", pageDetails().type === "attack" && Boolean(state.latest));
@@ -764,18 +857,12 @@
         if (!avatar) return;
         avatar.classList.add("ki-attack-avatar-host");
         const bounds = attackEquipmentBounds(avatar);
-        const weaponItems = state.latest.items.filter((item) => WEAPON_CORNERS[Number(item.equip_slot)]);
+        const weaponItems = state.latest.items.filter((item) => DEFAULT_WEAPON_POSITIONS[Number(item.equip_slot)]);
         if (weaponItems.length && bounds.right > bounds.left && bounds.bottom > bounds.top) {
             const layer = W.document.createElement("div");
             layer.className = "ki-enemy-weapons-layer";
-            for (const item of weaponItems) {
-                const corner = WEAPON_CORNERS[Number(item.equip_slot)];
-                const label = createEnemyWeaponLabel(item);
-                label.classList.add(`is-${corner.horizontal}`, `is-${corner.vertical}`);
-                label.style.left = `${Math.round(corner.horizontal === "left" ? bounds.left : bounds.right)}px`;
-                label.style.top = `${Math.round(corner.vertical === "top" ? bounds.top : bounds.bottom)}px`;
-                layer.appendChild(label);
-            }
+            for (const item of weaponItems) layer.appendChild(createEnemyWeaponLabel(item, bounds));
+            layer.appendChild(createCalibrationControl());
             W.document.body.appendChild(layer);
         }
         for (const item of state.latest.items) {
@@ -804,7 +891,7 @@
         if (state.attackLayoutObserver || !W.document.body) return;
         state.attackLayoutObserver = new MutationObserver((records) => {
             const changed = records.some((record) => [...record.addedNodes, ...record.removedNodes].some((node) =>
-                !(node instanceof W.Element) || !node.matches?.(".ki-enemy-weapons-layer,.ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-enemy-weapon-label,.ki-armour-stat-label")
+                !(node instanceof W.Element) || !node.matches?.(".ki-enemy-weapons-layer,.ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-enemy-weapon-label,.ki-calibration-control,.ki-armour-stat-label")
             ));
             if (changed) scheduleAttackEquipmentRender();
         });
@@ -939,20 +1026,23 @@
             #kraken-intel-panel.ki-profile-inline .ki-item small,#kraken-intel-panel.ki-profile-inline .ki-meta,#kraken-intel-panel.ki-profile-inline .ki-note{color:var(--default-color-light,#aaa)}
             .ki-attack-weapon-host{position:relative!important;overflow:visible!important}
             .ki-enemy-weapons-layer{position:fixed;z-index:2147483000;inset:0;pointer-events:none}
-            .ki-enemy-weapon-label{position:absolute;box-sizing:border-box;max-width:min(145px,36vw);color:#f4f4f4;pointer-events:none;padding:2px 4px;font:10px/1.25 Arial,sans-serif;text-shadow:0 1px 2px #000,0 0 4px #000,0 0 7px #000}
-            .ki-enemy-weapon-label strong,.ki-enemy-weapon-label span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+            .ki-enemy-weapon-label{position:absolute;box-sizing:border-box;max-width:min(155px,39vw);transform:translate(-50%,-50%);color:#f4f4f4;pointer-events:none;display:grid;grid-template-columns:38px minmax(0,1fr);align-items:center;gap:5px;padding:3px;font:10px/1.25 Arial,sans-serif;text-shadow:0 1px 2px #000,0 0 4px #000,0 0 7px #000;touch-action:none}
+            .ki-enemy-weapon-label img{display:block;width:36px;height:30px;object-fit:contain;filter:drop-shadow(0 1px 2px #000)}
+            .ki-enemy-weapon-copy{display:block;min-width:0}
+            .ki-enemy-weapon-label strong,.ki-enemy-weapon-label .ki-enemy-weapon-copy>span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             .ki-enemy-weapon-label strong{font-size:11px}
-            .ki-enemy-weapon-label span{color:#d6dde0}
-            .ki-enemy-weapon-label.is-right{transform:translateX(-100%);text-align:right}
-            .ki-enemy-weapon-label.is-bottom{transform:translateY(-100%)}
-            .ki-enemy-weapon-label.is-right.is-bottom{transform:translate(-100%,-100%)}
+            .ki-enemy-weapon-label .ki-enemy-weapon-copy>span{color:#d6dde0}
+            .ki-position-readout{display:none;color:#7ee5ee;white-space:nowrap;font:700 8px/1.2 Arial,sans-serif}
+            .ki-calibration-control{position:absolute;left:50%;top:8px;transform:translateX(-50%);pointer-events:auto;border:1px solid #177d86;background:#10171bea;color:#e9f3f4;border-radius:5px;padding:4px 8px;font:700 9px Arial,sans-serif;box-shadow:0 2px 6px #0008}
+            html.ki-calibrating .ki-enemy-weapon-label{pointer-events:auto;border:1px dashed #67cbd4;background:#10171bbd;border-radius:4px}
+            html.ki-calibrating .ki-position-readout{display:block}
             .ki-attack-avatar-host{position:relative!important}
             .ki-armour-stat-label{position:absolute;z-index:12;max-width:145px;border:1px solid #177d8688;border-radius:4px;background:#10171bd9;color:#e9f3f4;pointer-events:none;padding:3px 5px;font:8px/1.2 Arial,sans-serif;box-shadow:0 2px 6px #0007}
             .ki-armour-stat-label strong,.ki-armour-stat-label span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             .ki-armour-stat-label span{color:#9eb0b5}
             html.ki-loadout-revealed [class*='modal'][class*='defender']{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:transparent!important;pointer-events:none!important}
             html.ki-loadout-revealed .ki-attack-avatar-host img,html.ki-loadout-revealed .ki-attack-avatar-host [class*='avatar'],html.ki-loadout-revealed .ki-attack-avatar-host [class*='defender']{filter:none!important;opacity:1!important}
-            @media (width<=700px){.ki-enemy-weapon-label{max-width:34vw;font-size:9px}.ki-enemy-weapon-label strong{font-size:10px}.ki-armour-stat-label{max-width:120px}}
+            @media (width<=700px){.ki-enemy-weapon-label{max-width:38vw;grid-template-columns:32px minmax(0,1fr);font-size:9px}.ki-enemy-weapon-label img{width:30px;height:26px}.ki-enemy-weapon-label strong{font-size:10px}.ki-armour-stat-label{max-width:120px}}
         `;
         (W.document.head || W.document.documentElement).appendChild(style);
     }
