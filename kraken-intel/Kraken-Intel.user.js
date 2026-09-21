@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.3.1
+// @version      0.3.2
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.3.1";
+    const VERSION = "0.3.2";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -420,13 +420,16 @@
             if (!quiet) {
                 if (!shared && !state.latest) state.status = "No shared loadout has been observed for this player yet.";
                 renderPanel();
+                if (!shared && !state.latest) hideEmptyPanelSoon(3000);
             } else if (shared) {
                 renderPanel();
             }
         } catch (error) {
             if (!quiet && !state.latest) {
                 state.status = `Shared connection unavailable: ${error.message}`;
+                showPanel();
                 renderPanel();
+                hideEmptyPanelSoon(3000);
             }
             console.warn(`[${SCRIPT}] Shared sync failed`, error);
         } finally {
