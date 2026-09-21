@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.6.4
+// @version      0.6.5
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.6.4";
+    const VERSION = "0.6.5";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -796,34 +796,69 @@
 
         positionWeaponLabel(label, weaponPosition(item.equip_slot), bounds);
         let dragging = false;
-        label.addEventListener("pointerdown", (event) => {
-            if (!state.attackCalibration) return;
-            dragging = true;
-            event.preventDefault();
-            event.stopPropagation();
-            label.setPointerCapture?.(event.pointerId);
-        });
-        label.addEventListener("pointermove", (event) => {
+        const moveTo = (clientX, clientY) => {
             if (!dragging || !state.attackCalibration) return;
-            const position = {
-                x: Math.min(100, Math.max(0, (event.clientX - bounds.left) / (bounds.right - bounds.left) * 100)),
-                y: Math.min(100, Math.max(0, (event.clientY - bounds.top) / (bounds.bottom - bounds.top) * 100))
-            };
-            positionWeaponLabel(label, position, bounds);
-            event.preventDefault();
-        });
-        const finishDrag = (event) => {
+            const width = Math.max(1, bounds.right - bounds.left);
+            const height = Math.max(1, bounds.bottom - bounds.top);
+            positionWeaponLabel(label, {
+                x: Math.min(100, Math.max(0, (clientX - bounds.left) / width * 100)),
+                y: Math.min(100, Math.max(0, (clientY - bounds.top) / height * 100))
+            }, bounds);
+        };
+        const savePosition = () => {
             if (!dragging) return;
             dragging = false;
             saveWeaponPosition(item.equip_slot, {
                 x: Number(label.dataset.x),
                 y: Number(label.dataset.y)
             });
-            label.releasePointerCapture?.(event.pointerId);
+        };
+
+        label.addEventListener("touchstart", (event) => {
+            if (!state.attackCalibration || !event.touches[0]) return;
+            dragging = true;
+            moveTo(event.touches[0].clientX, event.touches[0].clientY);
+            event.preventDefault();
+            event.stopPropagation();
+        }, { passive: false });
+        label.addEventListener("touchmove", (event) => {
+            if (!dragging || !event.touches[0]) return;
+            moveTo(event.touches[0].clientX, event.touches[0].clientY);
+            event.preventDefault();
+            event.stopPropagation();
+        }, { passive: false });
+        label.addEventListener("touchend", (event) => {
+            savePosition();
+            event.preventDefault();
+            event.stopPropagation();
+        }, { passive: false });
+        label.addEventListener("touchcancel", savePosition, { passive: false });
+
+        label.addEventListener("pointerdown", (event) => {
+            if (!state.attackCalibration || event.pointerType === "touch") return;
+            dragging = true;
+            moveTo(event.clientX, event.clientY);
+            event.preventDefault();
+            event.stopPropagation();
+            try {
+                label.setPointerCapture?.(event.pointerId);
+            } catch {}
+        });
+        label.addEventListener("pointermove", (event) => {
+            if (!dragging || event.pointerType === "touch") return;
+            moveTo(event.clientX, event.clientY);
+            event.preventDefault();
+        });
+        const finishPointerDrag = (event) => {
+            if (event.pointerType === "touch") return;
+            savePosition();
+            try {
+                label.releasePointerCapture?.(event.pointerId);
+            } catch {}
             event.preventDefault();
         };
-        label.addEventListener("pointerup", finishDrag);
-        label.addEventListener("pointercancel", finishDrag);
+        label.addEventListener("pointerup", finishPointerDrag);
+        label.addEventListener("pointercancel", finishPointerDrag);
         return label;
     }
 
@@ -1036,7 +1071,7 @@
             .ki-enemy-weapon-label .ki-enemy-weapon-copy>span{color:#d6dde0}
             .ki-position-readout{display:none;color:#7ee5ee;white-space:nowrap;font:700 8px/1.2 Arial,sans-serif}
             .ki-calibration-control{position:absolute;transform:translateX(-50%);pointer-events:auto;border:1px solid #177d86;background:#10171bea;color:#e9f3f4;border-radius:5px;padding:4px 8px;font:700 9px Arial,sans-serif;box-shadow:0 2px 6px #0008}
-            html.ki-calibrating .ki-enemy-weapon-label{pointer-events:auto;border:1px dashed #67cbd4;background:#10171bbd;border-radius:4px}
+            html.ki-calibrating .ki-enemy-weapons-layer{pointer-events:auto;touch-action:none}\n            html.ki-calibrating .ki-enemy-weapon-label{pointer-events:auto;border:1px dashed #67cbd4;background:#10171bbd;border-radius:4px;-webkit-user-select:none;user-select:none}
             html.ki-calibrating .ki-position-readout{display:block}
             .ki-attack-avatar-host{position:relative!important}
             .ki-armour-stat-label{position:absolute;z-index:12;max-width:145px;border:1px solid #177d8688;border-radius:4px;background:#10171bd9;color:#e9f3f4;pointer-events:none;padding:3px 5px;font:8px/1.2 Arial,sans-serif;box-shadow:0 2px 6px #0007}
