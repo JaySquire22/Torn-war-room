@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.6.0
+// @version      0.6.1
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.6.0";
+    const VERSION = "0.6.1";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -653,8 +653,11 @@
     }
 
     function attackAvatarArea() {
+        const defenderModal = W.document.querySelector("[class*='modal'][class*='defender']");
+        if (defenderModal) return defenderModal.closest("[class*='playerArea']") || defenderModal.parentElement;
         const areas = [...W.document.querySelectorAll("#attack-root [class*='playerArea'], [class*='playerArea']")];
-        return areas.find((area) => area.querySelector("[class*='defender'], [id*='defender']")) || areas.at(-1) || null;
+        if (areas.length) return areas.find((area) => area.querySelector("[class*='defender'], [id*='defender']")) || areas.at(-1);
+        return W.document.querySelector("#attack-root [class*='fight'], #attack-root") || null;
     }
 
     function createEnemyWeaponCard(item) {
@@ -675,23 +678,26 @@
 
     function renderAttackEquipment() {
         state.attackRenderFrame = null;
-        W.document.querySelectorAll(".ki-enemy-weapon-card,.ki-armour-stat-label").forEach((node) => node.remove());
+        W.document.querySelectorAll(".ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-armour-stat-label").forEach((node) => node.remove());
         W.document.querySelectorAll(".ki-attack-weapon-host").forEach((node) => node.classList.remove("ki-attack-weapon-host"));
         W.document.querySelectorAll(".ki-attack-avatar-host").forEach((node) => node.classList.remove("ki-attack-avatar-host"));
+        W.document.documentElement.classList.toggle("ki-loadout-revealed", pageDetails().type === "attack" && Boolean(state.latest));
         if (pageDetails().type !== "attack" || !state.latest?.items) return;
-
-        for (const item of state.latest.items) {
-            const slot = Number(item.equip_slot);
-            if (![1, 2, 3, 5].includes(slot)) continue;
-            const wrapper = attackerWeaponWrapper(slot);
-            if (!wrapper) continue;
-            wrapper.classList.add("ki-attack-weapon-host");
-            wrapper.appendChild(createEnemyWeaponCard(item));
-        }
 
         const avatar = attackAvatarArea();
         if (!avatar) return;
         avatar.classList.add("ki-attack-avatar-host");
+        const weaponItems = state.latest.items.filter((item) => [1, 2, 3, 5].includes(Number(item.equip_slot)));
+        if (weaponItems.length) {
+            const column = W.document.createElement("div");
+            column.className = "ki-enemy-weapons-column";
+            for (const item of weaponItems) {
+                const card = createEnemyWeaponCard(item);
+                card.classList.add("is-column-card");
+                column.appendChild(card);
+            }
+            avatar.appendChild(column);
+        }
         for (const item of state.latest.items) {
             const position = ARMOUR_LABEL_POSITIONS[Number(item.equip_slot)];
             const details = position ? itemSummary(item) : "";
@@ -718,7 +724,7 @@
         if (state.attackLayoutObserver || !W.document.body) return;
         state.attackLayoutObserver = new MutationObserver((records) => {
             const changed = records.some((record) => [...record.addedNodes, ...record.removedNodes].some((node) =>
-                !(node instanceof W.Element) || !node.matches?.(".ki-enemy-weapon-card,.ki-armour-stat-label")
+                !(node instanceof W.Element) || !node.matches?.(".ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-armour-stat-label")
             ));
             if (changed) scheduleAttackEquipmentRender();
         });
@@ -845,6 +851,12 @@
             #kraken-intel-panel .ki-enable{border:1px solid #49c5d0;background:#177d86;color:#fff;border-radius:5px;padding:6px 9px;font:700 11px Arial,sans-serif;cursor:pointer}
             #kraken-intel-panel.ki-profile-inline{position:static;z-index:auto;width:100%;max-width:none;margin:10px 0 0;border-color:#177d86;box-shadow:none}
             #kraken-intel-panel.ki-profile-inline .ki-body{max-height:none}
+            #kraken-intel-panel.ki-profile-inline{border-color:var(--panel-divider-outer-side-color,#555);background:var(--default-bg-panel-color,#2f2f2f);color:var(--default-color,#ddd);border-radius:5px}
+            #kraken-intel-panel.ki-profile-inline .ki-head{background:linear-gradient(180deg,#666,#3b3b3b);color:var(--default-color,#eee);min-height:38px;padding:8px 12px}
+            #kraken-intel-panel.ki-profile-inline .ki-body{background:var(--default-bg-panel-color,#2f2f2f)}
+            #kraken-intel-panel.ki-profile-inline .ki-meta,#kraken-intel-panel.ki-profile-inline .ki-row,#kraken-intel-panel.ki-profile-inline .ki-note{border-color:var(--panel-divider-outer-side-color,#555)}
+            #kraken-intel-panel.ki-profile-inline .ki-slot{color:var(--default-blue-color,#71b6d7)}
+            #kraken-intel-panel.ki-profile-inline .ki-item small,#kraken-intel-panel.ki-profile-inline .ki-meta,#kraken-intel-panel.ki-profile-inline .ki-note{color:var(--default-color-light,#aaa)}
             .ki-attack-weapon-host{position:relative!important;overflow:visible!important}
             .ki-enemy-weapon-card{position:absolute;z-index:12;box-sizing:border-box;left:calc(100% + 4px);top:2px;width:142px;max-width:34vw;height:calc(100% - 4px);border:1px solid #177d86aa;border-radius:5px;background:#10171be8;color:#e9f3f4;pointer-events:none;display:grid;grid-template-columns:38px minmax(0,1fr);align-items:center;gap:5px;padding:4px;font:9px/1.2 Arial,sans-serif;box-shadow:0 2px 8px #0007}
             .ki-enemy-weapon-card img{display:block;max-width:36px;max-height:30px;object-fit:contain}
@@ -852,10 +864,14 @@
             .ki-enemy-weapon-card strong,.ki-enemy-weapon-card small{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             .ki-enemy-weapon-card small{color:#9eb0b5}
             .ki-attack-avatar-host{position:relative!important}
+            .ki-enemy-weapons-column{position:absolute;z-index:13;left:4px;top:8px;width:142px;max-width:34vw;display:flex;flex-direction:column;gap:4px;pointer-events:none}
+            .ki-enemy-weapon-card.is-column-card{position:relative;left:auto;top:auto;width:100%;max-width:none;height:58px;flex:none}
             .ki-armour-stat-label{position:absolute;z-index:12;max-width:145px;border:1px solid #177d8688;border-radius:4px;background:#10171bd9;color:#e9f3f4;pointer-events:none;padding:3px 5px;font:8px/1.2 Arial,sans-serif;box-shadow:0 2px 6px #0007}
             .ki-armour-stat-label strong,.ki-armour-stat-label span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             .ki-armour-stat-label span{color:#9eb0b5}
-            @media (width<=700px){.ki-enemy-weapon-card{width:126px;max-width:32vw;grid-template-columns:30px minmax(0,1fr)}.ki-enemy-weapon-card img{max-width:29px;max-height:26px}.ki-armour-stat-label{max-width:120px}}
+            html.ki-loadout-revealed [class*='modal'][class*='defender']{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:transparent!important}
+            html.ki-loadout-revealed .ki-attack-avatar-host img,html.ki-loadout-revealed .ki-attack-avatar-host [class*='avatar'],html.ki-loadout-revealed .ki-attack-avatar-host [class*='defender']{filter:none!important;opacity:1!important}
+            @media (width<=700px){.ki-enemy-weapon-card{width:126px;max-width:32vw;grid-template-columns:30px minmax(0,1fr)}.ki-enemy-weapon-card img{max-width:29px;max-height:26px}.ki-enemy-weapons-column{width:126px;max-width:32vw}.ki-armour-stat-label{max-width:120px}}
         `;
         (W.document.head || W.document.documentElement).appendChild(style);
     }
