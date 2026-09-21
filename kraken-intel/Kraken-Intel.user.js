@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.6.1
+// @version      0.6.2
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.6.1";
+    const VERSION = "0.6.2";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -232,14 +232,34 @@
         return Array.isArray(container?.item) && objectRecord(container.item[0]) ? container.item[0] : null;
     }
 
-    function normalizeBonuses(item) {
-        if (!objectRecord(item?.currentBonuses)) return [];
-        return Object.values(item.currentBonuses).flatMap((raw) => {
+    function nestedValues(root, wantedKeys, maxDepth = 4) {
+        const wanted = new Set(wantedKeys.map((key) => key.toLowerCase().replace(/[^a-z0-9]/g, "")));
+        const found = [];
+        const seen = new Set();
+        const visit = (value, depth) => {
+            if (!objectRecord(value) && !Array.isArray(value) || seen.has(value) || depth > maxDepth) return;
+            seen.add(value);
+            for (const [key, child] of Object.entries(value)) {
+                const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+                if (wanted.has(normalizedKey)) found.push(child);
+                if (objectRecord(child) || Array.isArray(child)) visit(child, depth + 1);
+            }
+        };
+        visit(root, 0);
+        return found;
+    }
+
+    function normalizeBonuses(...sources) {
+        const bonusContainers = sources.flatMap((source) => nestedValues(source, ["currentBonuses", "bonuses", "bonus"]));
+        return bonusContainers.flatMap((container) => {
+            const values = Array.isArray(container) ? container : objectRecord(container) ? Object.values(container) : [];
+            return values.flatMap((raw) => {
             if (!objectRecord(raw)) return [];
             const name = String(raw.title || raw.name || "Bonus").slice(0, 60);
-            const numeric = Number(raw.value);
+            const numeric = finiteItemNumber(raw.value, raw.percentage, raw.percent, raw.proc);
             return [{ name, value: Number.isFinite(numeric) ? numeric : null }];
-        }).slice(0, 2);
+            });
+        }).filter((bonus, index, all) => all.findIndex((candidate) => candidate.name === bonus.name && candidate.value === bonus.value) === index).slice(0, 2);
     }
 
     function finiteItemNumber(...values) {
@@ -252,9 +272,28 @@
         return null;
     }
 
-    function normalizeItem(item) {
+    function nestedItemNumber(sources, keys) {
+        return finiteItemNumber(...sources.flatMap((source) => nestedValues(source, keys)));
+    }
+
+    function equipmentSnapshot(value, depth = 0, seen = new WeakSet()) {
+        if (value === null || ["string", "number", "boolean"].includes(typeof value)) return value;
+        if (typeof value !== "object" || depth > 6 || seen.has(value)) return null;
+        seen.add(value);
+        if (Array.isArray(value)) return value.slice(0, 24).map((entry) => equipmentSnapshot(entry, depth + 1, seen));
+        const snapshot = {};
+        for (const [key, child] of Object.entries(value).slice(0, 100)) {
+            if (/token|cookie|authorization|api.?key|attackeruser/i.test(key)) continue;
+            const safe = equipmentSnapshot(child, depth + 1, seen);
+            if (safe !== null) snapshot[key] = safe;
+        }
+        return snapshot;
+    }
+
+    function normalizeItem(item, container = null) {
         const equipSlot = Number(item.equipSlot);
         if (!COMBAT_SLOTS.has(equipSlot) && Number(item.ID) !== 999) return null;
+        const sources = [item, container].filter(Boolean);
         return {
             item_id: positiveInteger(item.ID),
             armoury_id: positiveInteger(item.armouryID ?? item.armoryID),
@@ -264,12 +303,13 @@
             image_url: itemImageUrl(item),
             damage: finiteItemNumber(item.dmg, item.damage),
             accuracy: finiteItemNumber(item.acc, item.accuracy),
-            armour: finiteItemNumber(item.armor, item.armour, item.def, item.defence, item.defense, item.stats?.armor, item.stats?.defence),
-            quality: finiteItemNumber(item.quality, item.qualityPercentage, item.quality_percent, item.itemQuality, item.stats?.quality),
+            armour: nestedItemNumber(sources, ["armor", "armour", "arm", "def", "defence", "defense", "armorRating", "armourRating", "rating"]),
+            quality: nestedItemNumber(sources, ["quality", "qualityPercentage", "qualityPercent", "itemQuality"]),
             rarity: typeof item.rarity === "string" && item.rarity.trim()
                 ? item.rarity.trim().slice(0, 24)
                 : null,
-            bonuses: normalizeBonuses(item)
+            bonuses: normalizeBonuses(item, container),
+            raw_source: container ? equipmentSnapshot(container) : null
         };
     }
 
@@ -298,7 +338,7 @@
         if (!objectRecord(defenderItems)) return [];
         return Object.values(defenderItems).flatMap((container) => {
             const item = firstItem(container);
-            const normalized = item ? normalizeItem(item) : null;
+            const normalized = item ? normalizeItem(item, container) : null;
             return normalized ? [normalized] : [];
         });
     }
@@ -317,7 +357,7 @@
         if (!meaningfulItems.length) return null;
 
         return {
-            schema_version: 2,
+            schema_version: 3,
             target_id: targetId,
             target_name: typeof db.defenderUser?.playername === "string"
                 ? db.defenderUser.playername.slice(0, 64)
@@ -372,6 +412,12 @@
 
     function sharedRowToCapture(row) {
         if (!objectRecord(row) || !positiveInteger(row.target_id) || !Array.isArray(row.items)) return null;
+        const items = row.items.map((item) => {
+            if (!objectRecord(item?.raw_source)) return item;
+            const rawItem = firstItem(item.raw_source);
+            const refreshed = rawItem ? normalizeItem(rawItem, item.raw_source) : null;
+            return refreshed ? { ...item, ...refreshed } : item;
+        });
         return {
             schema_version: positiveInteger(row.schema_version) || 1,
             target_id: Number(row.target_id),
@@ -379,7 +425,7 @@
             observed_at: row.observed_at,
             fight_id: positiveInteger(row.fight_id),
             attack_status: typeof row.attack_status === "string" ? row.attack_status : null,
-            items: row.items,
+            items,
             source: "shared"
         };
     }
@@ -649,7 +695,15 @@
                 ? marker
                 : marker.closest("[class*='weaponWrapper']") || marker;
         }
-        return null;
+        const slotIndex = new Map([[1, 0], [2, 1], [3, 2], [5, 3]]).get(Number(slot));
+        if (slotIndex === undefined) return null;
+        const candidates = [...W.document.querySelectorAll("#attack-root [class*='weaponWrapper'], [class*='weaponWrapper']")]
+            .filter((element) => {
+                const rect = element.getBoundingClientRect();
+                return rect.width >= 70 && rect.height >= 60 && rect.left < W.innerWidth * .32 && rect.bottom > 0 && rect.top < W.innerHeight;
+            })
+            .sort((left, right) => left.getBoundingClientRect().top - right.getBoundingClientRect().top);
+        return candidates[slotIndex] || null;
     }
 
     function attackAvatarArea() {
@@ -678,7 +732,7 @@
 
     function renderAttackEquipment() {
         state.attackRenderFrame = null;
-        W.document.querySelectorAll(".ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-armour-stat-label").forEach((node) => node.remove());
+        W.document.querySelectorAll(".ki-enemy-weapons-layer,.ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-armour-stat-label").forEach((node) => node.remove());
         W.document.querySelectorAll(".ki-attack-weapon-host").forEach((node) => node.classList.remove("ki-attack-weapon-host"));
         W.document.querySelectorAll(".ki-attack-avatar-host").forEach((node) => node.classList.remove("ki-attack-avatar-host"));
         W.document.documentElement.classList.toggle("ki-loadout-revealed", pageDetails().type === "attack" && Boolean(state.latest));
@@ -689,14 +743,21 @@
         avatar.classList.add("ki-attack-avatar-host");
         const weaponItems = state.latest.items.filter((item) => [1, 2, 3, 5].includes(Number(item.equip_slot)));
         if (weaponItems.length) {
-            const column = W.document.createElement("div");
-            column.className = "ki-enemy-weapons-column";
+            const layer = W.document.createElement("div");
+            layer.className = "ki-enemy-weapons-layer";
             for (const item of weaponItems) {
+                const nativeWeapon = attackerWeaponWrapper(item.equip_slot);
+                if (!nativeWeapon) continue;
+                const rect = nativeWeapon.getBoundingClientRect();
                 const card = createEnemyWeaponCard(item);
-                card.classList.add("is-column-card");
-                column.appendChild(card);
+                card.classList.add("is-aligned-card");
+                card.style.left = `${Math.round(rect.right + 4)}px`;
+                card.style.top = `${Math.round(rect.top + 2)}px`;
+                card.style.width = `${Math.max(96, Math.min(136, W.innerWidth - rect.right - 10))}px`;
+                card.style.height = `${Math.max(44, Math.min(58, rect.height - 4))}px`;
+                layer.appendChild(card);
             }
-            avatar.appendChild(column);
+            if (layer.childElementCount) W.document.body.appendChild(layer);
         }
         for (const item of state.latest.items) {
             const position = ARMOUR_LABEL_POSITIONS[Number(item.equip_slot)];
@@ -724,7 +785,7 @@
         if (state.attackLayoutObserver || !W.document.body) return;
         state.attackLayoutObserver = new MutationObserver((records) => {
             const changed = records.some((record) => [...record.addedNodes, ...record.removedNodes].some((node) =>
-                !(node instanceof W.Element) || !node.matches?.(".ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-armour-stat-label")
+                !(node instanceof W.Element) || !node.matches?.(".ki-enemy-weapons-layer,.ki-enemy-weapons-column,.ki-enemy-weapon-card,.ki-armour-stat-label")
             ));
             if (changed) scheduleAttackEquipmentRender();
         });
@@ -858,6 +919,7 @@
             #kraken-intel-panel.ki-profile-inline .ki-slot{color:var(--default-blue-color,#71b6d7)}
             #kraken-intel-panel.ki-profile-inline .ki-item small,#kraken-intel-panel.ki-profile-inline .ki-meta,#kraken-intel-panel.ki-profile-inline .ki-note{color:var(--default-color-light,#aaa)}
             .ki-attack-weapon-host{position:relative!important;overflow:visible!important}
+            .ki-enemy-weapons-layer{position:fixed;z-index:2147483000;inset:0;pointer-events:none}
             .ki-enemy-weapon-card{position:absolute;z-index:12;box-sizing:border-box;left:calc(100% + 4px);top:2px;width:142px;max-width:34vw;height:calc(100% - 4px);border:1px solid #177d86aa;border-radius:5px;background:#10171be8;color:#e9f3f4;pointer-events:none;display:grid;grid-template-columns:38px minmax(0,1fr);align-items:center;gap:5px;padding:4px;font:9px/1.2 Arial,sans-serif;box-shadow:0 2px 8px #0007}
             .ki-enemy-weapon-card img{display:block;max-width:36px;max-height:30px;object-fit:contain}
             .ki-enemy-weapon-card span{display:flex;min-width:0;flex-direction:column}
@@ -866,10 +928,11 @@
             .ki-attack-avatar-host{position:relative!important}
             .ki-enemy-weapons-column{position:absolute;z-index:13;left:4px;top:8px;width:142px;max-width:34vw;display:flex;flex-direction:column;gap:4px;pointer-events:none}
             .ki-enemy-weapon-card.is-column-card{position:relative;left:auto;top:auto;width:100%;max-width:none;height:58px;flex:none}
+            .ki-enemy-weapon-card.is-aligned-card{max-width:none}
             .ki-armour-stat-label{position:absolute;z-index:12;max-width:145px;border:1px solid #177d8688;border-radius:4px;background:#10171bd9;color:#e9f3f4;pointer-events:none;padding:3px 5px;font:8px/1.2 Arial,sans-serif;box-shadow:0 2px 6px #0007}
             .ki-armour-stat-label strong,.ki-armour-stat-label span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             .ki-armour-stat-label span{color:#9eb0b5}
-            html.ki-loadout-revealed [class*='modal'][class*='defender']{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:transparent!important}
+            html.ki-loadout-revealed [class*='modal'][class*='defender']{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:transparent!important;pointer-events:none!important}
             html.ki-loadout-revealed .ki-attack-avatar-host img,html.ki-loadout-revealed .ki-attack-avatar-host [class*='avatar'],html.ki-loadout-revealed .ki-attack-avatar-host [class*='defender']{filter:none!important;opacity:1!important}
             @media (width<=700px){.ki-enemy-weapon-card{width:126px;max-width:32vw;grid-template-columns:30px minmax(0,1fr)}.ki-enemy-weapon-card img{max-width:29px;max-height:26px}.ki-enemy-weapons-column{width:126px;max-width:32vw}.ki-armour-stat-label{max-width:120px}}
         `;
@@ -1004,7 +1067,12 @@
 
     if (!currentTargetId() || W.__krakenIntelInstalled) return;
     W.__krakenIntelInstalled = true;
-    if (pageDetails().type === "attack") installFetchObserver();
+    if (pageDetails().type === "attack") {
+        installFetchObserver();
+        W.addEventListener("resize", scheduleAttackEquipmentRender, { passive: true });
+        W.addEventListener("scroll", scheduleAttackEquipmentRender, { passive: true });
+        W.visualViewport?.addEventListener("resize", scheduleAttackEquipmentRender, { passive: true });
+    }
     if (pageDetails().type === "profile") installProfileAttackNavigation();
     installStyles();
     W.document.addEventListener("visibilitychange", () => {
