@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.4.1
+// @version      0.5.0
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.4.1";
+    const VERSION = "0.5.0";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -479,6 +479,11 @@
         if (!state.body) return;
         state.body.replaceChildren();
 
+        if (pageDetails().type === "attack" && state.latest) {
+            state.panel.hidden = true;
+            return;
+        }
+
         if (!sharingEnabled()) {
             const consent = W.document.createElement("div");
             consent.className = "ki-consent";
@@ -592,21 +597,94 @@
         }
     }
 
-    function inspectResponse(response) {
-        let clone;
-        try {
-            clone = response.clone();
-        } catch (error) {
-            console.warn(`[${SCRIPT}] Could not clone attack response`, error);
-            return;
+    function attackItemContainer(item) {
+        const currentBonuses = {};
+        for (const [index, bonus] of (Array.isArray(item.bonuses) ? item.bonuses : []).entries()) {
+            currentBonuses[index] = { title: bonus.name, value: bonus.value };
         }
-        clone.json()
-            .then((data) => {
-                if (objectRecord(data)) receiveAttackData(data).catch((error) => {
-                    console.warn(`[${SCRIPT}] Could not process attack response`, error);
-                });
-            })
-            .catch((error) => console.warn(`[${SCRIPT}] Could not read attack response`, error));
+        return { item: [{
+            ID: item.item_id,
+            armouryID: item.armoury_id,
+            equipSlot: item.equip_slot,
+            name: item.name,
+            dmg: item.damage,
+            acc: item.accuracy,
+            armor: item.armour,
+            def: item.armour,
+            quality: item.quality,
+            rarity: item.rarity,
+            currentBonuses
+        }] };
+    }
+
+    function patchAttackData(data, intel) {
+        const db = objectRecord(data?.DB) ? data.DB : data;
+        if (!objectRecord(db) || positiveInteger(db.defenderUser?.userID) !== intel.target_id) return data;
+        const nativeItems = objectRecord(db.defenderItems) ? db.defenderItems : {};
+        if (extractItems(nativeItems).some((item) => item.item_id !== 999)) return data;
+
+        const defenderItems = {};
+        for (const [key, container] of Object.entries(nativeItems)) {
+            const nativeItem = firstItem(container);
+            if ([999, 1000].includes(Number(nativeItem?.ID))) defenderItems[key] = container;
+        }
+        for (const item of intel.items || []) {
+            if (!positiveInteger(item.item_id) || !COMBAT_SLOTS.has(Number(item.equip_slot))) continue;
+            defenderItems[String(item.equip_slot)] = attackItemContainer(item);
+        }
+        if (!Object.keys(defenderItems).length) return data;
+
+        const patchedDb = { ...db, defenderItems, showEnemyItems: true };
+        return data.DB ? { ...data, DB: patchedDb } : patchedDb;
+    }
+
+    async function prepareAttackResponse(response) {
+        let data;
+        try {
+            data = await response.clone().json();
+        } catch (error) {
+            console.warn(`[${SCRIPT}] Could not read attack response`, error);
+            return response;
+        }
+        if (!objectRecord(data)) return response;
+
+        const capture = buildCapture(data);
+        if (capture) {
+            receiveAttackData(data).catch((error) => console.warn(`[${SCRIPT}] Could not process attack response`, error));
+            return response;
+        }
+
+        if (!state.latest && sharingEnabled()) {
+            try {
+                const shared = await fetchSharedCapture(currentTargetId());
+                if (shared) {
+                    state.latest = shared;
+                    state.status = "";
+                    saveCapture(shared);
+                    renderPanel();
+                }
+            } catch (error) {
+                console.warn(`[${SCRIPT}] Could not load attack intel`, error);
+            }
+        }
+
+        if (!state.latest) {
+            receiveAttackData(data).catch((error) => console.warn(`[${SCRIPT}] Could not process attack response`, error));
+            return response;
+        }
+
+        const patched = patchAttackData(data, state.latest);
+        if (patched === data) return response;
+        try {
+            return new W.Response(JSON.stringify(patched), {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers
+            });
+        } catch (error) {
+            console.warn(`[${SCRIPT}] Could not reveal saved equipment in Torn's attack display`, error);
+            return response;
+        }
     }
 
     function installFetchObserver() {
@@ -617,8 +695,8 @@
             const result = Reflect.apply(originalFetch, this, args);
             if (!isAttackDataRequest(args[0])) return result;
             return result.then((response) => {
-                if (response?.ok) inspectResponse(response);
-                return response;
+                if (!response?.ok) return response;
+                return prepareAttackResponse(response);
             });
         }
 
@@ -721,6 +799,7 @@
         W.document.body.appendChild(panel);
         state.panel = panel;
         state.body = body;
+        if (pageDetails().type === "attack") panel.hidden = true;
         if (pageDetails().type === "profile") maintainProfilePanelPlacement(panel);
         renderPanel();
     }
