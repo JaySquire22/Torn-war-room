@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.5.1
+// @version      0.6.0
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -21,7 +21,7 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.5.1";
+    const VERSION = "0.6.0";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
@@ -50,7 +50,9 @@
         syncing: false,
         noDataNoticeShown: false,
         hideTimer: null,
-        profilePlacementObserver: null
+        profilePlacementObserver: null,
+        attackLayoutObserver: null,
+        attackRenderFrame: null
     };
 
     function showPanel() {
@@ -485,6 +487,7 @@
 
         if (pageDetails().type === "attack" && state.latest) {
             state.panel.hidden = true;
+            scheduleAttackEquipmentRender();
             return;
         }
 
@@ -623,6 +626,106 @@
         }] };
     }
 
+    const ATTACKER_WEAPON_MARKERS = {
+        1: ["attacker_Primary", "weapon_main"],
+        2: ["attacker_Secondary", "weapon_second"],
+        3: ["attacker_Melee", "weapon_melee"],
+        5: ["attacker_Temporary", "weapon_temp"]
+    };
+
+    const ARMOUR_LABEL_POSITIONS = {
+        4: { top: "31%", left: "57%" },
+        6: { top: "12%", left: "56%" },
+        7: { top: "57%", left: "57%" },
+        8: { top: "79%", left: "56%" },
+        9: { top: "43%", left: "62%" }
+    };
+
+    function attackerWeaponWrapper(slot) {
+        for (const id of ATTACKER_WEAPON_MARKERS[slot] || []) {
+            const marker = W.document.getElementById(id);
+            if (!marker) continue;
+            return marker.matches("[class*='weaponWrapper']")
+                ? marker
+                : marker.closest("[class*='weaponWrapper']") || marker;
+        }
+        return null;
+    }
+
+    function attackAvatarArea() {
+        const areas = [...W.document.querySelectorAll("#attack-root [class*='playerArea'], [class*='playerArea']")];
+        return areas.find((area) => area.querySelector("[class*='defender'], [id*='defender']")) || areas.at(-1) || null;
+    }
+
+    function createEnemyWeaponCard(item) {
+        const card = W.document.createElement("div");
+        card.className = "ki-enemy-weapon-card";
+        const image = W.document.createElement("img");
+        image.src = item.image_url || `https://www.torn.com/images/items/${item.item_id}/large.png`;
+        image.alt = "";
+        const copy = W.document.createElement("span");
+        const name = W.document.createElement("strong");
+        name.textContent = item.name;
+        const details = W.document.createElement("small");
+        details.textContent = itemSummary(item) || "Saved enemy weapon";
+        copy.append(name, details);
+        card.append(image, copy);
+        return card;
+    }
+
+    function renderAttackEquipment() {
+        state.attackRenderFrame = null;
+        W.document.querySelectorAll(".ki-enemy-weapon-card,.ki-armour-stat-label").forEach((node) => node.remove());
+        W.document.querySelectorAll(".ki-attack-weapon-host").forEach((node) => node.classList.remove("ki-attack-weapon-host"));
+        W.document.querySelectorAll(".ki-attack-avatar-host").forEach((node) => node.classList.remove("ki-attack-avatar-host"));
+        if (pageDetails().type !== "attack" || !state.latest?.items) return;
+
+        for (const item of state.latest.items) {
+            const slot = Number(item.equip_slot);
+            if (![1, 2, 3, 5].includes(slot)) continue;
+            const wrapper = attackerWeaponWrapper(slot);
+            if (!wrapper) continue;
+            wrapper.classList.add("ki-attack-weapon-host");
+            wrapper.appendChild(createEnemyWeaponCard(item));
+        }
+
+        const avatar = attackAvatarArea();
+        if (!avatar) return;
+        avatar.classList.add("ki-attack-avatar-host");
+        for (const item of state.latest.items) {
+            const position = ARMOUR_LABEL_POSITIONS[Number(item.equip_slot)];
+            const details = position ? itemSummary(item) : "";
+            if (!position || !details) continue;
+            const label = W.document.createElement("div");
+            label.className = "ki-armour-stat-label";
+            label.style.top = position.top;
+            label.style.left = position.left;
+            const name = W.document.createElement("strong");
+            name.textContent = item.name;
+            const stats = W.document.createElement("span");
+            stats.textContent = details;
+            label.append(name, stats);
+            avatar.appendChild(label);
+        }
+    }
+
+    function scheduleAttackEquipmentRender() {
+        if (state.attackRenderFrame !== null || pageDetails().type !== "attack") return;
+        state.attackRenderFrame = W.requestAnimationFrame(renderAttackEquipment);
+    }
+
+    function observeAttackLayout() {
+        if (state.attackLayoutObserver || !W.document.body) return;
+        state.attackLayoutObserver = new MutationObserver((records) => {
+            const changed = records.some((record) => [...record.addedNodes, ...record.removedNodes].some((node) =>
+                !(node instanceof W.Element) || !node.matches?.(".ki-enemy-weapon-card,.ki-armour-stat-label")
+            ));
+            if (changed) scheduleAttackEquipmentRender();
+        });
+        state.attackLayoutObserver.observe(W.document.body, { childList: true, subtree: true });
+        scheduleAttackEquipmentRender();
+    }
+
     function patchAttackData(data, intel) {
         const db = objectRecord(data?.DB) ? data.DB : data;
         if (!objectRecord(db) || positiveInteger(db.defenderUser?.userID) !== intel.target_id) return data;
@@ -742,6 +845,17 @@
             #kraken-intel-panel .ki-enable{border:1px solid #49c5d0;background:#177d86;color:#fff;border-radius:5px;padding:6px 9px;font:700 11px Arial,sans-serif;cursor:pointer}
             #kraken-intel-panel.ki-profile-inline{position:static;z-index:auto;width:100%;max-width:none;margin:10px 0 0;border-color:#177d86;box-shadow:none}
             #kraken-intel-panel.ki-profile-inline .ki-body{max-height:none}
+            .ki-attack-weapon-host{position:relative!important;overflow:visible!important}
+            .ki-enemy-weapon-card{position:absolute;z-index:12;box-sizing:border-box;left:calc(100% + 4px);top:2px;width:142px;max-width:34vw;height:calc(100% - 4px);border:1px solid #177d86aa;border-radius:5px;background:#10171be8;color:#e9f3f4;pointer-events:none;display:grid;grid-template-columns:38px minmax(0,1fr);align-items:center;gap:5px;padding:4px;font:9px/1.2 Arial,sans-serif;box-shadow:0 2px 8px #0007}
+            .ki-enemy-weapon-card img{display:block;max-width:36px;max-height:30px;object-fit:contain}
+            .ki-enemy-weapon-card span{display:flex;min-width:0;flex-direction:column}
+            .ki-enemy-weapon-card strong,.ki-enemy-weapon-card small{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+            .ki-enemy-weapon-card small{color:#9eb0b5}
+            .ki-attack-avatar-host{position:relative!important}
+            .ki-armour-stat-label{position:absolute;z-index:12;max-width:145px;border:1px solid #177d8688;border-radius:4px;background:#10171bd9;color:#e9f3f4;pointer-events:none;padding:3px 5px;font:8px/1.2 Arial,sans-serif;box-shadow:0 2px 6px #0007}
+            .ki-armour-stat-label strong,.ki-armour-stat-label span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+            .ki-armour-stat-label span{color:#9eb0b5}
+            @media (width<=700px){.ki-enemy-weapon-card{width:126px;max-width:32vw;grid-template-columns:30px minmax(0,1fr)}.ki-enemy-weapon-card img{max-width:29px;max-height:26px}.ki-armour-stat-label{max-width:120px}}
         `;
         (W.document.head || W.document.documentElement).appendChild(style);
     }
@@ -854,6 +968,7 @@
         state.body = body;
         if (pageDetails().type === "attack") panel.hidden = true;
         if (pageDetails().type === "profile") maintainProfilePanelPlacement(panel);
+        if (pageDetails().type === "attack") observeAttackLayout();
         renderPanel();
     }
 
