@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Intel
 // @namespace    kraken.intel
-// @version      0.6.7
+// @version      0.7.0
 // @author       -TheKraken-
 // @description  Captures and shares equipment Torn reveals on manually viewed attack pages.
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-intel/Kraken-Intel.user.js
@@ -9,6 +9,7 @@
 // @match        https://www.torn.com/page.php*
 // @match        https://www.torn.com/profiles.php*
 // @connect      igiyqcgpwonbbjdnvxwd.supabase.co
+// @connect      api.torn.com
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -21,13 +22,14 @@
 
     const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
     const SCRIPT = "Kraken Intel";
-    const VERSION = "0.6.7";
+    const VERSION = "0.7.0";
     const SUPABASE_URL = "https://igiyqcgpwonbbjdnvxwd.supabase.co";
     const SUPABASE_KEY = "sb_publishable_GE2jnNatcy9lopAx1WGujA_06d_yPHd";
     const STORAGE_KEY = "kraken_intel_local_captures_v1";
     const CONSENT_KEY = "kraken_intel_sharing_consent_v1";
     const AUTH_STORAGE_KEY = "kraken_intel_supabase_session_v1";
-    const POSITION_STORAGE_KEY = "kraken_intel_weapon_positions_v3";
+    const TORN_API_KEY_STORAGE_KEY = "kraken_intel_torn_api_key_v1";
+    const ITEM_DETAILS_CACHE_KEY = "kraken_intel_item_details_cache_v1";
     const MAX_LOCAL_CAPTURES = 200;
     const SYNC_INTERVAL_MS = 60e3;
     const COMBAT_SLOTS = new Map([
@@ -54,7 +56,7 @@
         profilePlacementObserver: null,
         attackLayoutObserver: null,
         attackRenderFrame: null,
-        attackCalibration: false
+        enriching: false
     };
 
     function showPanel() {
@@ -89,6 +91,11 @@
 
     function sharingEnabled() {
         return readValue(CONSENT_KEY, false) === true;
+    }
+
+    function storedTornApiKey() {
+        const value = readValue(TORN_API_KEY_STORAGE_KEY, "");
+        return typeof value === "string" ? value.trim() : "";
     }
 
     function parseJson(text) {
@@ -147,6 +154,57 @@
             ...(encoded === null ? {} : { body: encoded })
         }).then(async (response) => wrap(response.status, await response.text()))
             .catch(() => wrap(0, ""));
+    }
+
+    function externalJsonRequest(url) {
+        const wrap = (status, text) => ({
+            ok: status >= 200 && status < 300,
+            status,
+            data: parseJson(text)
+        });
+        if (typeof W.PDA_httpGet === "function") {
+            return W.PDA_httpGet(url, { Accept: "application/json" })
+                .then((result) => wrap(Number(result?.status || 0), String(result?.responseText || "")))
+                .catch(() => wrap(0, ""));
+        }
+        if (typeof GM_xmlhttpRequest === "function") {
+            return new Promise((resolve) => {
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url,
+                    headers: { Accept: "application/json" },
+                    timeout: 12e3,
+                    onload: (result) => resolve(wrap(result.status, result.responseText)),
+                    onerror: () => resolve(wrap(0, "")),
+                    ontimeout: () => resolve(wrap(0, ""))
+                });
+            });
+        }
+        return W.fetch(url, { headers: { Accept: "application/json" } })
+            .then(async (response) => wrap(response.status, await response.text()))
+            .catch(() => wrap(0, ""));
+    }
+
+    function tornApiError(response, fallback = "Torn API request failed") {
+        const error = response?.data?.error;
+        const message = typeof error?.error === "string"
+            ? error.error
+            : typeof error === "string"
+                ? error
+                : typeof response?.data?.message === "string"
+                    ? response.data.message
+                    : null;
+        return message || (response?.status ? `${fallback} (HTTP ${response.status})` : `${fallback}: connection unavailable`);
+    }
+
+    async function tornApiRequest(path, key = storedTornApiKey()) {
+        if (!key) throw new Error("No Torn API key is saved");
+        const url = new URL(`https://api.torn.com${path}`);
+        url.searchParams.set("key", key);
+        url.searchParams.set("comment", "Kraken-Intel");
+        const response = await externalJsonRequest(url.href);
+        if (!response.ok || response.data?.error) throw new Error(tornApiError(response));
+        return response.data;
     }
 
     function normalizedSession(raw) {
@@ -345,6 +403,107 @@
         });
     }
 
+    function itemDetailRecords(value, records = [], depth = 0) {
+        if (depth > 5 || value === null || typeof value !== "object") return records;
+        if (Array.isArray(value)) {
+            for (const entry of value) itemDetailRecords(entry, records, depth + 1);
+            return records;
+        }
+        const uid = positiveInteger(value.uid ?? value.UID ?? value.armouryID ?? value.armoryID);
+        if (uid && (objectRecord(value.stats) || Array.isArray(value.bonuses) || value.quality !== undefined)) {
+            records.push(value);
+            return records;
+        }
+        for (const child of Object.values(value)) itemDetailRecords(child, records, depth + 1);
+        return records;
+    }
+
+    function normalizedApiItemDetails(raw) {
+        if (!objectRecord(raw)) return null;
+        const stats = objectRecord(raw.stats) ? raw.stats : raw;
+        const armour = finiteItemNumber(stats.armor, stats.armour, raw.armor, raw.armour);
+        const quality = finiteItemNumber(stats.quality, raw.quality);
+        const bonuses = normalizeBonuses(raw);
+        const rarity = typeof raw.rarity === "string" && raw.rarity.trim() ? raw.rarity.trim().slice(0, 24) : null;
+        if (armour === null && quality === null && !bonuses.length && !rarity) return null;
+        return { armour, quality, bonuses, rarity, fetched_at: new Date().toISOString() };
+    }
+
+    function cachedItemDetails() {
+        const stored = readValue(ITEM_DETAILS_CACHE_KEY, {});
+        return objectRecord(stored) ? stored : {};
+    }
+
+    async function fetchUniqueItemDetails(uids) {
+        const unique = [...new Set(uids.map(positiveInteger).filter(Boolean))];
+        if (!unique.length || !storedTornApiKey()) return new Map();
+        const cache = cachedItemDetails();
+        const found = new Map();
+        const missing = [];
+        for (const uid of unique) {
+            const cached = objectRecord(cache[uid]) ? cache[uid] : null;
+            if (cached) found.set(uid, cached);
+            else missing.push(uid);
+        }
+        for (let index = 0; index < missing.length; index += 25) {
+            const batch = missing.slice(index, index + 25);
+            const data = await tornApiRequest(`/v2/torn/${batch.join(",")}/itemdetails`);
+            for (const record of itemDetailRecords(data)) {
+                const uid = positiveInteger(record.uid ?? record.UID ?? record.armouryID ?? record.armoryID);
+                const normalized = normalizedApiItemDetails(record);
+                if (!uid || !normalized || !unique.includes(uid)) continue;
+                cache[uid] = normalized;
+                found.set(uid, normalized);
+            }
+        }
+        const trimmed = Object.fromEntries(Object.entries(cache).slice(-500));
+        writeValue(ITEM_DETAILS_CACHE_KEY, trimmed);
+        return found;
+    }
+
+    async function enrichCaptureWithTornApi(capture) {
+        if (!capture?.items || !storedTornApiKey()) return capture;
+        const armour = capture.items.filter((item) => isArmourSlot(item) && positiveInteger(item.armoury_id));
+        if (!armour.length) return capture;
+        const details = await fetchUniqueItemDetails(armour.map((item) => item.armoury_id));
+        if (!details.size) return capture;
+        return {
+            ...capture,
+            items: capture.items.map((item) => {
+                const detail = details.get(positiveInteger(item.armoury_id));
+                if (!detail) return item;
+                return {
+                    ...item,
+                    armour: detail.armour ?? item.armour,
+                    quality: detail.quality ?? item.quality,
+                    rarity: detail.rarity || item.rarity,
+                    bonuses: detail.bonuses?.length ? detail.bonuses : item.bonuses,
+                    detail_source: "torn-api-itemdetails"
+                };
+            })
+        };
+    }
+
+    async function refreshLatestArmourDetails() {
+        if (!state.latest || !storedTornApiKey() || state.enriching) return state.latest;
+        const current = state.latest;
+        state.enriching = true;
+        try {
+            const enriched = await enrichCaptureWithTornApi(current);
+            if (state.latest === current) {
+                state.latest = enriched;
+                saveCapture(enriched);
+                renderPanel();
+            }
+            return enriched;
+        } catch (error) {
+            console.warn(`[${SCRIPT}] Torn API armour lookup failed`, error);
+            return current;
+        } finally {
+            state.enriching = false;
+        }
+    }
+
     function buildCapture(data) {
         if (!visibleAndFocused()) return null;
         const db = objectRecord(data?.DB) ? data.DB : data;
@@ -529,6 +688,72 @@
         return [4, 6, 7, 8, 9].includes(Number(item?.equip_slot));
     }
 
+    function appendTornApiSettings(parent) {
+        if (pageDetails().type !== "profile") return;
+        const savedKey = storedTornApiKey();
+        const settings = W.document.createElement("details");
+        settings.className = "ki-api-settings";
+        const summary = W.document.createElement("summary");
+        summary.textContent = savedKey ? "Torn API connected" : "Connect Torn API";
+        const copy = W.document.createElement("p");
+        copy.textContent = "Used to request exact armour details from Torn when the captured unique item ID is available. The key stays in this device's userscript storage and is never uploaded to Kraken Intel.";
+        const input = W.document.createElement("input");
+        input.type = "password";
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.placeholder = savedKey ? "Enter a replacement key" : "Enter Torn API key";
+        input.setAttribute("aria-label", "Torn API key");
+        const actions = W.document.createElement("div");
+        actions.className = "ki-api-actions";
+        const save = W.document.createElement("button");
+        save.type = "button";
+        save.textContent = savedKey ? "Replace key" : "Save key";
+        const feedback = W.document.createElement("span");
+        feedback.className = "ki-api-feedback";
+        save.addEventListener("click", async () => {
+            const key = input.value.trim();
+            if (!key) {
+                feedback.textContent = "Enter an API key first.";
+                feedback.classList.add("is-error");
+                return;
+            }
+            save.disabled = true;
+            save.textContent = "Checking…";
+            feedback.textContent = "";
+            feedback.classList.remove("is-error");
+            try {
+                await tornApiRequest("/v2/key/info", key);
+                writeValue(TORN_API_KEY_STORAGE_KEY, key);
+                input.value = "";
+                summary.textContent = "Torn API connected";
+                save.textContent = "Saved";
+                feedback.textContent = "Key verified.";
+                renderPanel();
+                refreshLatestArmourDetails().then((enriched) => {
+                    if (sharingEnabled() && enriched) uploadSharedCapture(enriched).catch((error) => console.warn(`[${SCRIPT}] Could not share enriched armour details`, error));
+                });
+            } catch (error) {
+                feedback.textContent = error.message;
+                feedback.classList.add("is-error");
+                save.disabled = false;
+                save.textContent = savedKey ? "Replace key" : "Save key";
+            }
+        });
+        actions.appendChild(save);
+        if (savedKey) {
+            const remove = W.document.createElement("button");
+            remove.type = "button";
+            remove.textContent = "Remove key";
+            remove.addEventListener("click", () => {
+                writeValue(TORN_API_KEY_STORAGE_KEY, "");
+                renderPanel();
+            });
+            actions.appendChild(remove);
+        }
+        settings.append(summary, copy, input, actions, feedback);
+        parent.appendChild(settings);
+    }
+
     function renderPanel() {
         if (!state.body) return;
         state.body.replaceChildren();
@@ -543,7 +768,7 @@
             const consent = W.document.createElement("div");
             consent.className = "ki-consent";
             const copy = W.document.createElement("p");
-            copy.textContent = "Kraken Intel collaboratively shares equipment Torn reveals on attack pages you actively view, together with the target ID and observation time. It does not automate attacks or store a Torn API key.";
+            copy.textContent = "Kraken Intel collaboratively shares equipment Torn reveals on attack pages you actively view, together with the target ID and observation time. It does not automate attacks. Any Torn API key you add below remains on this device and is never shared.";
             const enable = W.document.createElement("button");
             enable.type = "button";
             enable.className = "ki-enable";
@@ -565,7 +790,10 @@
             state.body.appendChild(status);
         }
 
-        if (!state.latest) return;
+        if (!state.latest) {
+            appendTornApiSettings(state.body);
+            return;
+        }
         const meta = W.document.createElement("div");
         meta.className = "ki-meta";
         const confidence = observationConfidence(state.latest.observed_at);
@@ -625,6 +853,7 @@
             ? "Shared automatically with the Kraken Intel contributor network. Newer observations take priority."
             : "Saved locally on this device; shared uploads are currently disabled.";
         state.body.appendChild(note);
+        appendTornApiSettings(state.body);
     }
 
     async function receiveAttackData(data) {
@@ -646,9 +875,10 @@
         renderPanel();
         W.document.dispatchEvent(new CustomEvent("kraken-intel:capture", { detail: capture }));
         console.info(`[${SCRIPT}] Captured loadout for ${capture.target_id}`, capture);
+        const enriched = await refreshLatestArmourDetails();
         if (!sharingEnabled()) return;
         try {
-            await uploadSharedCapture(capture);
+            await uploadSharedCapture(enriched || capture);
         } catch (error) {
             console.warn(`[${SCRIPT}] Shared upload failed`, error);
         }
@@ -718,34 +948,13 @@
 
     const DEFAULT_WEAPON_POSITIONS = {
         1: { x: 20, y: 12.5 },
-        2: { x: 75, y: 12.5 },
+        2: { x: 80, y: 12.5 },
         3: { x: 20, y: 90 },
-        5: { x: 76, y: 90 }
+        5: { x: 80, y: 90 }
     };
 
-    function storedWeaponPositions() {
-        const stored = readValue(POSITION_STORAGE_KEY, {});
-        return objectRecord(stored) ? stored : {};
-    }
-
     function weaponPosition(slot) {
-        const saved = storedWeaponPositions()[slot];
-        const fallback = DEFAULT_WEAPON_POSITIONS[slot] || { x: 50, y: 50 };
-        const x = Number(saved?.x);
-        const y = Number(saved?.y);
-        return {
-            x: Number.isFinite(x) ? Math.min(100, Math.max(0, x)) : fallback.x,
-            y: Number.isFinite(y) ? Math.min(100, Math.max(0, y)) : fallback.y
-        };
-    }
-
-    function saveWeaponPosition(slot, position) {
-        const positions = storedWeaponPositions();
-        positions[slot] = {
-            x: Math.round(position.x * 10) / 10,
-            y: Math.round(position.y * 10) / 10
-        };
-        writeValue(POSITION_STORAGE_KEY, positions);
+        return DEFAULT_WEAPON_POSITIONS[slot] || { x: 50, y: 50 };
     }
 
     function attackEquipmentBounds(avatar) {
@@ -768,8 +977,6 @@
         label.style.top = `${Math.round(bounds.top + (bounds.bottom - bounds.top) * position.y / 100)}px`;
         label.dataset.x = String(Math.round(position.x * 10) / 10);
         label.dataset.y = String(Math.round(position.y * 10) / 10);
-        const readout = label.querySelector(".ki-position-readout");
-        if (readout) readout.textContent = `X ${label.dataset.x}% · Y ${label.dataset.y}%`;
     }
 
     function createEnemyWeaponLabel(item, bounds) {
@@ -789,97 +996,11 @@
         damage.textContent = `Dmg ${item.damage ?? "—"}`;
         const accuracy = W.document.createElement("span");
         accuracy.textContent = `Acc ${item.accuracy ?? "—"}`;
-        const readout = W.document.createElement("em");
-        readout.className = "ki-position-readout";
-        copy.append(name, damage, accuracy, readout);
+        copy.append(name, damage, accuracy);
         label.append(copy, image);
 
         positionWeaponLabel(label, weaponPosition(item.equip_slot), bounds);
-        let dragging = false;
-        const moveTo = (clientX, clientY) => {
-            if (!dragging || !state.attackCalibration) return;
-            const width = Math.max(1, bounds.right - bounds.left);
-            const height = Math.max(1, bounds.bottom - bounds.top);
-            positionWeaponLabel(label, {
-                x: Math.min(100, Math.max(0, (clientX - bounds.left) / width * 100)),
-                y: Math.min(100, Math.max(0, (clientY - bounds.top) / height * 100))
-            }, bounds);
-        };
-        const savePosition = () => {
-            if (!dragging) return;
-            dragging = false;
-            saveWeaponPosition(item.equip_slot, {
-                x: Number(label.dataset.x),
-                y: Number(label.dataset.y)
-            });
-        };
-
-        label.addEventListener("touchstart", (event) => {
-            if (!state.attackCalibration || !event.touches[0]) return;
-            dragging = true;
-            moveTo(event.touches[0].clientX, event.touches[0].clientY);
-            event.preventDefault();
-            event.stopPropagation();
-        }, { passive: false });
-        label.addEventListener("touchmove", (event) => {
-            if (!dragging || !event.touches[0]) return;
-            moveTo(event.touches[0].clientX, event.touches[0].clientY);
-            event.preventDefault();
-            event.stopPropagation();
-        }, { passive: false });
-        label.addEventListener("touchend", (event) => {
-            savePosition();
-            event.preventDefault();
-            event.stopPropagation();
-        }, { passive: false });
-        label.addEventListener("touchcancel", savePosition, { passive: false });
-
-        label.addEventListener("pointerdown", (event) => {
-            if (!state.attackCalibration || event.pointerType === "touch") return;
-            dragging = true;
-            moveTo(event.clientX, event.clientY);
-            event.preventDefault();
-            event.stopPropagation();
-            try {
-                label.setPointerCapture?.(event.pointerId);
-            } catch {}
-        });
-        label.addEventListener("pointermove", (event) => {
-            if (!dragging || event.pointerType === "touch") return;
-            moveTo(event.clientX, event.clientY);
-            event.preventDefault();
-        });
-        const finishPointerDrag = (event) => {
-            if (event.pointerType === "touch") return;
-            savePosition();
-            try {
-                label.releasePointerCapture?.(event.pointerId);
-            } catch {}
-            event.preventDefault();
-        };
-        label.addEventListener("pointerup", finishPointerDrag);
-        label.addEventListener("pointercancel", finishPointerDrag);
         return label;
-    }
-
-    function createCalibrationControl(bounds) {
-        const control = W.document.createElement("button");
-        control.type = "button";
-        control.className = "ki-calibration-control";
-        control.style.left = `${Math.round((bounds.left + bounds.right) / 2)}px`;
-        control.style.top = `${Math.round(bounds.top + 8)}px`;
-        const sync = () => {
-            control.textContent = state.attackCalibration ? "Done" : "Adjust intel";
-            W.document.documentElement.classList.toggle("ki-calibrating", state.attackCalibration);
-        };
-        control.addEventListener("click", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            state.attackCalibration = !state.attackCalibration;
-            sync();
-        });
-        sync();
-        return control;
     }
 
     function renderAttackEquipment() {
@@ -899,7 +1020,6 @@
             const layer = W.document.createElement("div");
             layer.className = "ki-enemy-weapons-layer";
             for (const item of weaponItems) layer.appendChild(createEnemyWeaponLabel(item, bounds));
-            layer.appendChild(createCalibrationControl(bounds));
             W.document.body.appendChild(layer);
         }
         for (const item of state.latest.items) {
@@ -1053,6 +1173,15 @@
             #kraken-intel-panel .ki-consent{padding:10px;border-bottom:1px solid #ffffff17;background:#123037}
             #kraken-intel-panel .ki-consent p{margin:0 0 9px;color:#cfdee0;font-size:10px;line-height:1.4}
             #kraken-intel-panel .ki-enable{border:1px solid #49c5d0;background:#177d86;color:#fff;border-radius:5px;padding:6px 9px;font:700 11px Arial,sans-serif;cursor:pointer}
+            #kraken-intel-panel .ki-api-settings{border-top:1px solid #ffffff17;padding:8px 10px;color:#aab8bc}
+            #kraken-intel-panel .ki-api-settings summary{color:var(--default-color,#e9f3f4);cursor:pointer;font-weight:700}
+            #kraken-intel-panel .ki-api-settings p{margin:7px 0;font-size:10px;line-height:1.4}
+            #kraken-intel-panel .ki-api-settings input{box-sizing:border-box;width:100%;border:1px solid var(--panel-divider-outer-side-color,#60757a);border-radius:4px;background:var(--default-bg-panel-color,#20282b);color:var(--default-color,#eee);padding:7px;font:11px Arial,sans-serif}
+            #kraken-intel-panel .ki-api-actions{display:flex;gap:6px;margin-top:7px}
+            #kraken-intel-panel .ki-api-actions button{border:1px solid var(--panel-divider-outer-side-color,#60757a);border-radius:4px;background:var(--default-bg-panel-color,#343d40);color:var(--default-color,#eee);padding:5px 8px;font:700 10px Arial,sans-serif;cursor:pointer}
+            #kraken-intel-panel .ki-api-actions button:disabled{cursor:default;opacity:.6}
+            #kraken-intel-panel .ki-api-feedback{display:block;margin-top:6px;font-size:10px;color:#73d7a0}
+            #kraken-intel-panel .ki-api-feedback.is-error{color:#ec726e}
             #kraken-intel-panel.ki-profile-inline{position:static;z-index:auto;width:100%;max-width:none;margin:10px 0 0;border-color:#177d86;box-shadow:none}
             #kraken-intel-panel.ki-profile-inline .ki-body{max-height:none}
             #kraken-intel-panel.ki-profile-inline{border-color:var(--panel-divider-outer-side-color,#555);background:var(--default-bg-panel-color,#2f2f2f);color:var(--default-color,#ddd);border-radius:5px}
@@ -1064,22 +1193,18 @@
             .ki-attack-weapon-host{position:relative!important;overflow:visible!important}
             .ki-enemy-weapons-layer{position:fixed;z-index:2147483000;inset:0;pointer-events:none}
             .ki-enemy-weapon-label{position:absolute;box-sizing:border-box;max-width:min(115px,30vw);transform:translate(-50%,-50%);color:#f4f4f4;pointer-events:none;display:flex;flex-direction:column;align-items:center;gap:2px;padding:3px;text-align:center;font:10px/1.2 Arial,sans-serif;text-shadow:0 1px 2px #000,0 0 4px #000,0 0 7px #000;touch-action:none}
-            .ki-enemy-weapon-label img{display:block;width:48px;height:34px;object-fit:contain;filter:drop-shadow(0 1px 2px #000)}
+            .ki-enemy-weapon-label img{display:block;width:72px;height:51px;object-fit:contain;filter:drop-shadow(0 1px 2px #000)}
             .ki-enemy-weapon-copy{display:block;min-width:0;width:100%}
             .ki-enemy-weapon-label strong,.ki-enemy-weapon-label .ki-enemy-weapon-copy>span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             .ki-enemy-weapon-label strong{font-size:11px}
             .ki-enemy-weapon-label .ki-enemy-weapon-copy>span{color:#d6dde0}
-            .ki-position-readout{display:none;color:#7ee5ee;white-space:nowrap;font:700 8px/1.2 Arial,sans-serif}
-            .ki-calibration-control{position:absolute;transform:translateX(-50%);pointer-events:auto;border:1px solid #177d86;background:#10171bea;color:#e9f3f4;border-radius:5px;padding:4px 8px;font:700 9px Arial,sans-serif;box-shadow:0 2px 6px #0008}
-            html.ki-calibrating .ki-enemy-weapons-layer{pointer-events:auto;touch-action:none}\n            html.ki-calibrating .ki-enemy-weapon-label{pointer-events:auto;border:1px dashed #67cbd4;background:#10171bbd;border-radius:4px;-webkit-user-select:none;user-select:none}
-            html.ki-calibrating .ki-position-readout{display:block}
             .ki-attack-avatar-host{position:relative!important}
             .ki-armour-stat-label{position:absolute;z-index:12;max-width:145px;border:1px solid #177d8688;border-radius:4px;background:#10171bd9;color:#e9f3f4;pointer-events:none;padding:3px 5px;font:8px/1.2 Arial,sans-serif;box-shadow:0 2px 6px #0007}
             .ki-armour-stat-label strong,.ki-armour-stat-label span{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
             .ki-armour-stat-label span{color:#9eb0b5}
             html.ki-loadout-revealed [class*='modal'][class*='defender']{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:transparent!important;pointer-events:none!important}
             html.ki-loadout-revealed .ki-attack-avatar-host img,html.ki-loadout-revealed .ki-attack-avatar-host [class*='avatar'],html.ki-loadout-revealed .ki-attack-avatar-host [class*='defender']{filter:none!important;opacity:1!important}
-            @media (width<=700px){.ki-enemy-weapon-label{max-width:30vw;font-size:9px}.ki-enemy-weapon-label img{width:44px;height:32px}.ki-enemy-weapon-label strong{font-size:10px}.ki-armour-stat-label{max-width:120px}}
+            @media (width<=700px){.ki-enemy-weapon-label{max-width:30vw;font-size:9px}.ki-enemy-weapon-label img{width:66px;height:48px}.ki-enemy-weapon-label strong{font-size:10px}.ki-armour-stat-label{max-width:120px}}
         `;
         (W.document.head || W.document.documentElement).appendChild(style);
     }
@@ -1207,6 +1332,7 @@
         }
         mountPanel();
         startSharedSync();
+        refreshLatestArmourDetails();
         console.info(`[${SCRIPT}] Loaded shared intel v${VERSION}`);
     }
 
