@@ -1,22 +1,23 @@
 // ==UserScript==
 // @name         Kraken Gym Trainer
 // @namespace    https://github.com/JaySquire22
-// @version      1.0.0
+// @version      1.0.1
 // @description  Steadfast, specialist-gym training limits and drug battle-stat estimates
-// @match        https://www.torn.com/gym.php*
+// @match        https://www.torn.com/*
+// @match        https://torn.com/*
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-gym-trainer.user.js
 // @updateURL    https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-gym-trainer.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      api.torn.com
-// @run-at       document-idle
+// @run-at       document-end
 // ==/UserScript==
 
 (() => {
   'use strict';
-  if (window.__krakenGymTrainer) return;
-  window.__krakenGymTrainer = true;
+  if (!/\/gym\.php(?:$|[?#])/i.test(location.pathname + location.search)) return;
+  if (document.getElementById('kgt')) return;
   const NAMES = ['strength', 'defense', 'speed', 'dexterity'];
   const LABEL = {strength:'Strength', defense:'Defense', speed:'Speed', dexterity:'Dexterity'};
   const get = (k, fallback) => typeof GM_getValue === 'function' ? GM_getValue(k, fallback) : localStorage.getItem(k) ?? fallback;
@@ -27,14 +28,13 @@
   let last = null, busy = false, refreshTimer = null;
   const style = document.createElement('style');
   style.textContent = `#kgt{box-sizing:border-box;background:#171d26;color:#f0f3f8;border:1px solid #35536c;border-radius:10px;padding:14px;margin:12px auto;max-width:1000px;font:13px/1.45 Arial,sans-serif}#kgt *{box-sizing:border-box}#kgt h3{margin:0 0 10px;color:#81d7eb;font-size:17px}#kgt h4{margin:14px 0 5px;font-size:13px;color:#81d7eb}#kgt .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}#kgt table{width:100%;border-collapse:collapse}#kgt td,#kgt th{padding:4px 3px;text-align:right;border-bottom:1px solid #33404a}#kgt td:first-child,#kgt th:first-child{text-align:left}#kgt .good{color:#7fe09a}#kgt .bad{color:#ff8179}#kgt .warn{color:#ffc36b}#kgt small{color:#a9b4c1}#kgt button{padding:5px 9px;margin:2px;border:1px solid #5d8298;background:#24384a;color:white;border-radius:5px;cursor:pointer}#kgt input{padding:5px;background:#101821;color:white;border:1px solid #668295;border-radius:4px}#kgt .status{margin-top:8px}#kgt .scroll{overflow:auto}#kgt .head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}`;
-  document.head.appendChild(style);
+  (document.head || document.documentElement).appendChild(style);
   const panel = document.createElement('section'); panel.id = 'kgt';
   panel.innerHTML = `<div class="head"><h3>🐙 Kraken Gym Trainer</h3><div><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="settings">Settings</button></div></div><div id="kgt-body">Enter your Torn API key in Settings to start.</div><div class="status" id="kgt-status"></div>`;
   const mount = () => {
     if (!document.body) return;
     if (!panel.isConnected) {
-      const target = document.querySelector('#gymroot, #gym, .gym-page, .content-wrapper, #mainContainer, #mainContainerUnlogged');
-      (target || document.body).prepend(panel);
+      document.body.prepend(panel);
     }
   };
   mount(); new MutationObserver(mount).observe(document.documentElement,{childList:true,subtree:true});
