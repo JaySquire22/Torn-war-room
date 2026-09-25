@@ -1,10 +1,9 @@
 // ==UserScript==
 // @name         Kraken Gym Trainer
 // @namespace    https://github.com/JaySquire22
-// @version      1.0.1
+// @version      1.0.2
 // @description  Steadfast, specialist-gym training limits and drug battle-stat estimates
-// @match        https://www.torn.com/*
-// @match        https://torn.com/*
+// @match        *
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-gym-trainer.user.js
 // @updateURL    https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-gym-trainer.user.js
 // @grant        GM_xmlhttpRequest
@@ -16,8 +15,13 @@
 
 (() => {
   'use strict';
-  if (!/\/gym\.php(?:$|[?#])/i.test(location.pathname + location.search)) return;
+  if (!/gym\.php/i.test(location.href) && !/^gym/i.test(document.title)) return;
   if (document.getElementById('kgt')) return;
+  const beacon = document.createElement('div');
+  beacon.id = 'kgt-beacon';
+  beacon.textContent = '🐙 Gym Trainer v1.0.2 loaded';
+  beacon.style.cssText = 'position:fixed;z-index:2147483647;top:170px;right:6px;background:#15394b;color:white;padding:7px;border:2px solid #7be2ef;border-radius:8px;font:12px Arial';
+  (document.body || document.documentElement).appendChild(beacon);
   const NAMES = ['strength', 'defense', 'speed', 'dexterity'];
   const LABEL = {strength:'Strength', defense:'Defense', speed:'Speed', dexterity:'Dexterity'};
   const get = (k, fallback) => typeof GM_getValue === 'function' ? GM_getValue(k, fallback) : localStorage.getItem(k) ?? fallback;
@@ -27,7 +31,7 @@
   const escape = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let last = null, busy = false, refreshTimer = null;
   const style = document.createElement('style');
-  style.textContent = `#kgt{box-sizing:border-box;background:#171d26;color:#f0f3f8;border:1px solid #35536c;border-radius:10px;padding:14px;margin:12px auto;max-width:1000px;font:13px/1.45 Arial,sans-serif}#kgt *{box-sizing:border-box}#kgt h3{margin:0 0 10px;color:#81d7eb;font-size:17px}#kgt h4{margin:14px 0 5px;font-size:13px;color:#81d7eb}#kgt .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}#kgt table{width:100%;border-collapse:collapse}#kgt td,#kgt th{padding:4px 3px;text-align:right;border-bottom:1px solid #33404a}#kgt td:first-child,#kgt th:first-child{text-align:left}#kgt .good{color:#7fe09a}#kgt .bad{color:#ff8179}#kgt .warn{color:#ffc36b}#kgt small{color:#a9b4c1}#kgt button{padding:5px 9px;margin:2px;border:1px solid #5d8298;background:#24384a;color:white;border-radius:5px;cursor:pointer}#kgt input{padding:5px;background:#101821;color:white;border:1px solid #668295;border-radius:4px}#kgt .status{margin-top:8px}#kgt .scroll{overflow:auto}#kgt .head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}`;
+  style.textContent = `#kgt{position:relative!important;z-index:2147483646!important;box-sizing:border-box;background:#171d26;color:#f0f3f8;border:1px solid #35536c;border-radius:10px;padding:14px;margin:12px auto;max-width:1000px;font:13px/1.45 Arial,sans-serif}#kgt *{box-sizing:border-box}#kgt h3{margin:0 0 10px;color:#81d7eb;font-size:17px}#kgt h4{margin:14px 0 5px;font-size:13px;color:#81d7eb}#kgt .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}#kgt table{width:100%;border-collapse:collapse}#kgt td,#kgt th{padding:4px 3px;text-align:right;border-bottom:1px solid #33404a}#kgt td:first-child,#kgt th:first-child{text-align:left}#kgt .good{color:#7fe09a}#kgt .bad{color:#ff8179}#kgt .warn{color:#ffc36b}#kgt small{color:#a9b4c1}#kgt button{padding:5px 9px;margin:2px;border:1px solid #5d8298;background:#24384a;color:white;border-radius:5px;cursor:pointer}#kgt input{padding:5px;background:#101821;color:white;border:1px solid #668295;border-radius:4px}#kgt .status{margin-top:8px}#kgt .scroll{overflow:auto}#kgt .head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}`;
   (document.head || document.documentElement).appendChild(style);
   const panel = document.createElement('section'); panel.id = 'kgt';
   panel.innerHTML = `<div class="head"><h3>🐙 Kraken Gym Trainer</h3><div><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="settings">Settings</button></div></div><div id="kgt-body">Enter your Torn API key in Settings to start.</div><div class="status" id="kgt-status"></div>`;
@@ -37,7 +41,7 @@
       document.body.prepend(panel);
     }
   };
-  mount(); new MutationObserver(mount).observe(document.documentElement,{childList:true,subtree:true});
+  mount(); if (!document.body) document.addEventListener('DOMContentLoaded',mount,{once:true}); new MutationObserver(mount).observe(document.documentElement,{childList:true,subtree:true});
   const body = () => panel.querySelector('#kgt-body');
   const status = (s, cls='') => {const e=panel.querySelector('#kgt-status'); e.className='status '+cls;e.textContent=s;};
   function request(url) {return new Promise((resolve,reject)=>GM_xmlhttpRequest({method:'GET',url,timeout:15000,onload:r=>{try{const d=JSON.parse(r.responseText);if(d.error) reject(new Error(d.error.error || 'API error'));else if(r.status!==200) reject(new Error('HTTP '+r.status));else resolve(d);}catch(e){reject(e)}},onerror:()=>reject(new Error('Network error')),ontimeout:()=>reject(new Error('API timed out'))}));}
