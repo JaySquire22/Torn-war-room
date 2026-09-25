@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kraken Gym Trainer
 // @namespace    https://github.com/JaySquire22
-// @version      1.0.2
+// @version      1.0.3
 // @description  Steadfast, specialist-gym training limits and drug battle-stat estimates
 // @match        *
 // @downloadURL  https://raw.githubusercontent.com/JaySquire22/Torn-war-room/main/kraken-gym-trainer.user.js
@@ -15,11 +15,18 @@
 
 (() => {
   'use strict';
-  if (!/gym\.php/i.test(location.href) && !/^gym/i.test(document.title)) return;
+  let attempts = 0;
+  function init() {
+  // Torn PDA may display the gym through a loader URL. Require gym-specific
+  // page content before reading a stored key or creating any UI.
+  if (!document.body || !/What would you like to train today\?/i.test(document.body.innerText || '')) {
+    if (++attempts < 20) setTimeout(init, 1000);
+    return;
+  }
   if (document.getElementById('kgt')) return;
   const beacon = document.createElement('div');
   beacon.id = 'kgt-beacon';
-  beacon.textContent = '🐙 Gym Trainer v1.0.2 loaded';
+  beacon.textContent = '🐙 Gym Trainer v1.0.3 loaded';
   beacon.style.cssText = 'position:fixed;z-index:2147483647;top:170px;right:6px;background:#15394b;color:white;padding:7px;border:2px solid #7be2ef;border-radius:8px;font:12px Arial';
   (document.body || document.documentElement).appendChild(beacon);
   const NAMES = ['strength', 'defense', 'speed', 'dexterity'];
@@ -94,4 +101,6 @@
   // Gym training is handled by Torn's own page; refresh after a successful interaction.
   document.addEventListener('click',e=>{if(e.target.closest('#kgt'))return;if(!e.target.closest('button,[role="button"],input[type="submit"]'))return;clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>{if(get('kgt_api_key',''))refresh();},3500);},true);
   if(get('kgt_api_key',''))refresh();else settings();
+  }
+  init();
 })();
